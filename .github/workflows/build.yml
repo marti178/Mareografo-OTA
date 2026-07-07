@@ -1,19 +1,30 @@
-name: Build PlatformIO Firmware
+name: Build and Deploy OTA
 
 on:
   push:
     branches:
       - main
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
-  build:
+  build-deploy:
     runs-on: ubuntu-latest
 
+    environment:
+      name: github-pages
+
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -24,8 +35,23 @@ jobs:
       - name: Build firmware
         run: pio run
 
-      - name: Upload firmware.bin
-        uses: actions/upload-artifact@v4
+      - name: Prepare OTA files
+        run: |
+          mkdir site
+          cp .pio/build/esp-wrover-kit/firmware.bin site/firmware.bin
+
+          cat > site/version.json << EOF
+          {
+            "version": "1.0.0",
+            "firmware": "firmware.bin"
+          }
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: firmware
-          path: .pio/build/**/firmware.bin
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
