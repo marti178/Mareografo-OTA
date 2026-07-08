@@ -5,9 +5,10 @@
 * Proyect Manager: Fernando Agostino
 * Proyect Leader: Martin Marotta
  **************************************************************/
-
+//Define Version of TinyGSM
+#define FIRMWARE_VERSION "1.0.0"
 // Select your modem:
- #define TINY_GSM_MODEM_SIM7080 true
+#define TINY_GSM_MODEM_SIM7080 true
 // Set serial 
 #define SerialMon Serial
 #define SerialMaxB Serial1
@@ -36,6 +37,10 @@ const char* topicAquaman1 = "Aquaman1/Aquaman1";
 #include <Arduino.h>
 #include<SFE_BMP180.h>
 
+#include <WiFiClient.h>
+#include <ArduinoJson.h>
+#include <ArduinoHttpClient.h>
+
 // Just in case someone defined the wrong thing..
 #if TINY_GSM_USE_GPRS && not defined TINY_GSM_MODEM_HAS_GPRS
 #undef TINY_GSM_USE_GPRS
@@ -60,8 +65,9 @@ TinyGsm        modem(SerialAT);
 TinyGsmClient client(modem);
 PubSubClient  mqtt(client);
 
+TinyGsmClientSecure otaClient(modem);
 
-
+#define MODEM_POWER_KEY 4
 #define DATAIN 32
 #define RANGING 33
 
@@ -109,13 +115,17 @@ void InitSensors(){
 }
 
 void InitModem(void){
+
+
     // Restart takes quite some time
   // To skip it, call init() instead of restart()
-  SerialMon.println("Initializing modem...");
-  modem.restart();
+  SerialMon.println("Initializing modem... ");
+  //dem.restart();
+  modem.init();
+  delay(60000);
+  modem.setPreferredMode(3); //Mode NB-Iot lo 
+  SerialMon.println("Configurando modem... ");
   delay(10000);
-  modem.setPreferredMode(3); //Mode NB-Iot
-  delay(1000);
 
   String modemInfo = modem.getModemInfo();
   SerialMon.print("Modem Info: ");
@@ -371,13 +381,103 @@ void MQTTVerify(){
   }
 
 }
+
+bool isNewerVersion(String nueva, String actual)
+{
+    int nMajor, nMinor, nPatch;
+    int aMajor, aMinor, aPatch;
+
+    sscanf(nueva.c_str(), "%d.%d.%d", &nMajor, &nMinor, &nPatch);
+    sscanf(actual.c_str(), "%d.%d.%d", &aMajor, &aMinor, &aPatch);
+
+
+    if(nMajor > aMajor)
+        return true;
+
+    if(nMajor == aMajor && nMinor > aMinor)
+        return true;
+
+    if(nMajor == aMajor && nMinor == aMinor && nPatch > aPatch)
+        return true;
+
+    return false;
+}
+
+void checkForUpdate()
+{
+    TinyGsmClientSecure otaClient(modem);
+
+    HttpClient http(
+        otaClient,
+        "marti178.github.io",
+        443
+    );
+
+    SerialMon.println("Consultando actualización...");
+
+    http.get("/Mareografo-OTA/version.json");
+
+
+    int httpCode = http.responseStatusCode();
+
+
+    if (httpCode == 200)
+    {
+        String payload = http.responseBody();
+
+        SerialMon.println("Respuesta:");
+        SerialMon.println(payload);
+
+
+        JsonDocument doc;
+
+        DeserializationError error = deserializeJson(doc, payload);
+
+        if(error)
+        {
+            SerialMon.println("Error leyendo JSON");
+            return;
+        }
+
+
+        String versionNueva = doc["version"];
+
+
+        SerialMon.print("Version actual: ");
+        SerialMon.println(FIRMWARE_VERSION);
+
+        SerialMon.print("Version servidor: ");
+        SerialMon.println(versionNueva);
+
+
+        if(isNewerVersion(versionNueva, FIRMWARE_VERSION))
+        {
+            SerialMon.println("Hay una actualización!");
+            // Acá después llamaremos a la función OTA
+        }
+        else
+        {
+            SerialMon.println("Firmware actualizado.");
+        }
+    }
+    else
+    {
+        SerialMon.print("Error HTTP: ");
+        SerialMon.println(httpCode);
+    }
+    SerialMon.print("Cerrando conexión HTTP...");
+    http.stop();       // si existe en tu versión
+    otaClient.stop();  // este seguro existe
+    delay(10000); // sino no se cierran sockets y se queda colgado el modem
+}
+
+
 void setup() {
   pinMode(12,OUTPUT);
   //pinMode(35, INPUT);
   InitUart();
   InitSensors();
   InitModem();
-
   // MQTT Broker setup
   mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
@@ -385,12 +485,15 @@ void setup() {
 }
 
 void loop() {
+  SerialMon.println("empezando LOOP");
+  checkForUpdate();
   digitalWrite(12,HIGH);
   SensadoYenvio();
   MQTTVerify();
-  delay(6000);
-
+  SerialMon.println("Pausa");
   digitalWrite(12,LOW);
   mqtt.loop();
+  checkForUpdate();
+  
   
 }
