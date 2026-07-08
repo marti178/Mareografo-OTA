@@ -66,6 +66,11 @@ TinyGsmClient client(modem);
 PubSubClient  mqtt(client);
 
 TinyGsmClientSecure otaClient(modem);
+    HttpClient http(
+        otaClient,
+        "marti178.github.io",
+        443
+    );
 
 #define MODEM_POWER_KEY 4
 #define DATAIN 32
@@ -76,13 +81,24 @@ SFE_BMP180 pressure;
 double temp;
 double pres;
 
+void powerOnModem()
+{
+  pinMode(MODEM_POWER_KEY, OUTPUT);
+  // SIM7070 power on 
+  digitalWrite(MODEM_POWER_KEY, HIGH);
+  delay(100);
+  digitalWrite(MODEM_POWER_KEY, LOW);
+  delay(1100);
+  digitalWrite(MODEM_POWER_KEY, HIGH);
+}
+
 void InitUart(void){
   //Seteo de modo de pines
   pinMode(DATAIN,INPUT); //Pin 32 entrada del Maxbotix
   pinMode(RANGING,OUTPUT); //Pin 33 salida para marcar comienzo de lectura del Maxbotix
 
   // Set console baud rate
-  SerialMon.begin(9600);
+  SerialMon.begin(115200);
   delay(1000);
   SerialAT.begin(9600,SERIAL_8N1,26,27);
   delay(1000);
@@ -92,11 +108,6 @@ void InitUart(void){
 
 void InitSensors(){
 
-   pinMode(4,OUTPUT); 
-   digitalWrite(4,HIGH);
-   delay(1000);
-   digitalWrite(4,LOW);   
-  delay(5000);
   if (pressure.begin())
   SerialMon.println("BMP180 Inicio completado");
   else
@@ -115,17 +126,17 @@ void InitSensors(){
 }
 
 void InitModem(void){
-
-
-    // Restart takes quite some time
+  
+  //powerOnModem();
+  // Restart takes quite some time
   // To skip it, call init() instead of restart()
   SerialMon.println("Initializing modem... ");
   //dem.restart();
   modem.init();
-  delay(60000);
+  delay(3000); 
   modem.setPreferredMode(3); //Mode NB-Iot lo 
   SerialMon.println("Configurando modem... ");
-  delay(10000);
+  delay(3000);
 
   String modemInfo = modem.getModemInfo();
   SerialMon.print("Modem Info: ");
@@ -133,12 +144,33 @@ void InitModem(void){
   delay(1000);
 
   SerialMon.print("Waiting for network...");
-    delay(1000);
-    if (!modem.waitForNetwork()) {
+    delay(3000);
+/*     if (!modem.waitForNetwork()) {
       SerialMon.println(" fail");
       delay(10000);
       return;
+    } */
+
+
+int intentos = 0;
+
+while (!modem.waitForNetwork(60000L))
+{
+    intentos++;
+
+    SerialMon.printf("Intento %d fallido\n", intentos);
+
+    if (intentos >= 5)
+    {
+        SerialMon.println("Reiniciando el módem...");
+        modem.restart();
+        intentos = 0;
     }
+
+    delay(5000);
+}
+
+
     SerialMon.println(" success");
 
     if (modem.isNetworkConnected()) { SerialMon.println("Network connected"); }
@@ -179,6 +211,8 @@ boolean mqttConnect() {
 
   if (status == false) {
     SerialMon.println(" fail");
+    SerialMon.print("MQTT state: ");
+    SerialMon.println(mqtt.state());
     return false;
   }
 
@@ -342,6 +376,7 @@ void SensadoYenvio()
 
 void MQTTVerify(){
     // Make sure we're still registered on the network
+    SerialMon.println("Pausa2");
   if (!modem.isNetworkConnected()) {
     SerialMon.println("Network disconnected");
     if (!modem.waitForNetwork(180000L, true)) {
@@ -352,7 +387,7 @@ void MQTTVerify(){
     if (modem.isNetworkConnected()) {
       SerialMon.println("Network re-connected");
     }
-
+SerialMon.println("Pausa2");
 
     // and make sure GPRS/EPS is still connected
     if (!modem.isGprsConnected()) {
@@ -368,17 +403,22 @@ void MQTTVerify(){
     }
 
   }
-    if (!mqtt.connected()) {
-    SerialMon.println("=== MQTT NOT CONNECTED ===");
-    // Reconnect every 10 seconds
-    uint32_t t = millis();
-    if (t - lastReconnectAttempt > 10000L) {
-      lastReconnectAttempt = t;
-      if (mqttConnect()) { lastReconnectAttempt = 0; }
+if (!mqtt.connected())
+{
+    if (lastReconnectAttempt == 0 ||
+        millis() - lastReconnectAttempt >= 10000UL)
+    {
+        lastReconnectAttempt = millis();
+
+        if (mqttConnect())
+        {
+            lastReconnectAttempt = 0;
+        }
     }
     delay(100);
     return;
-  }
+
+}
 
 }
 
@@ -405,13 +445,7 @@ bool isNewerVersion(String nueva, String actual)
 
 void checkForUpdate()
 {
-    TinyGsmClientSecure otaClient(modem);
-
-    HttpClient http(
-        otaClient,
-        "marti178.github.io",
-        443
-    );
+    //TinyGsmClientSecure otaClient(modem);
 
     SerialMon.println("Consultando actualización...");
 
@@ -481,19 +515,21 @@ void setup() {
   // MQTT Broker setup
   mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
-
+  
 }
 
 void loop() {
   SerialMon.println("empezando LOOP");
-  checkForUpdate();
+  
   digitalWrite(12,HIGH);
+  SerialMon.println("Pausa1");
   SensadoYenvio();
+  SerialMon.println("Pausa2");
   MQTTVerify();
-  SerialMon.println("Pausa");
+  SerialMon.println("Pausa3");
   digitalWrite(12,LOW);
   mqtt.loop();
-  checkForUpdate();
+  //checkForUpdate();
   
   
 }
