@@ -6,6 +6,8 @@
 * Proyect Leader: Martin Marotta
  **************************************************************/
 //Define Version of TinyGSM
+#define LINK_BIN "https://marti178.github.io/Mareografo-OTA/firmware.bin"
+#define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.txt"
 #define FIRMWARE_VERSION "1.0.0"
 // Select your modem:
 #define TINY_GSM_MODEM_SIM7080 true
@@ -41,6 +43,9 @@ const char* topicAquaman1 = "Aquaman1/Aquaman1";
 #include <ArduinoJson.h>
 #include <ArduinoHttpClient.h>
 
+#include <Update.h>
+#include <esp_ota_ops.h>
+
 // Just in case someone defined the wrong thing..
 #if TINY_GSM_USE_GPRS && not defined TINY_GSM_MODEM_HAS_GPRS
 #undef TINY_GSM_USE_GPRS
@@ -62,10 +67,11 @@ TinyGsm        modem(debugger);
 #else
 TinyGsm        modem(SerialAT);
 #endif
-TinyGsmClient client(modem);
+TinyGsmClient client(modem,0);
 PubSubClient  mqtt(client);
+TinyGsmClient test(modem, 1);
 
-TinyGsmClientSecure otaClient(modem);
+TinyGsmClientSecure otaClient(modem,2);
     HttpClient http(
         otaClient,
         "marti178.github.io",
@@ -80,6 +86,103 @@ uint32_t lastReconnectAttempt = 0;
 SFE_BMP180 pressure;
 double temp;
 double pres;
+
+bool downloadFirmware()
+{
+    SerialMon.println("Descargando firmware...");
+
+    http.get(LINK_BIN);
+
+    int statusCode = http.responseStatusCode();
+
+    if (statusCode != 200)
+    {
+        SerialMon.print("HTTP Error: ");
+        SerialMon.println(statusCode);
+        http.stop();
+        return false;
+    }
+
+    int contentLength = http.contentLength();
+
+    if (contentLength <= 0)
+    {
+        SerialMon.println("Content-Length inválido");
+        http.stop();
+        return false;
+    }
+
+    SerialMon.print("Firmware: ");
+    SerialMon.print(contentLength);
+    SerialMon.println(" bytes");
+
+    if (!Update.begin(contentLength))
+    {
+        SerialMon.println("No hay espacio suficiente para OTA");
+        http.stop();
+        return false;
+    }
+
+    uint8_t buffer[1024];
+
+    size_t written = 0;
+    int lastPercent = -1;
+
+    while (written < contentLength)
+    {
+        int available = http.available();
+
+        if (available)
+        {
+            int len = http.readBytes(buffer, min((int)sizeof(buffer), available));
+
+            if (len > 0)
+            {
+                if (Update.write(buffer, len) != (size_t)len)
+                {
+                    SerialMon.println("Error escribiendo flash");
+                    Update.abort();
+                    http.stop();
+                    return false;
+                }
+
+                written += len;
+
+                int percent = (written * 100) / contentLength;
+
+                if (percent != lastPercent)
+                {
+                    lastPercent = percent;
+                    SerialMon.printf("OTA %d%%\n", percent);
+                }
+            }
+        }
+
+        delay(1);
+    }
+
+    http.stop();
+
+    if (!Update.end())
+    {
+        SerialMon.print("Update Error: ");
+        SerialMon.println(Update.errorString());
+        return false;
+    }
+
+    if (!Update.isFinished())
+    {
+        SerialMon.println("Firmware incompleto");
+        return false;
+    }
+
+    SerialMon.println("OTA finalizada correctamente");
+    delay(1000);
+
+    ESP.restart();
+
+    return true;
+}
 
 void powerOnModem()
 {
@@ -131,11 +234,11 @@ void InitModem(void){
   // Restart takes quite some time
   // To skip it, call init() instead of restart()
   SerialMon.println("Initializing modem... ");
-  //dem.restart();
-  modem.init();
-  delay(3000); 
-  modem.setPreferredMode(3); //Mode NB-Iot lo 
+  modem.restart();
+  //modem.init();
+  delay(6000); 
   SerialMon.println("Configurando modem... ");
+  modem.setPreferredMode(3); //Mode NB-Iot lo 
   delay(3000);
 
   String modemInfo = modem.getModemInfo();
@@ -144,37 +247,29 @@ void InitModem(void){
   delay(1000);
 
   SerialMon.print("Waiting for network...");
-    delay(3000);
-/*     if (!modem.waitForNetwork()) {
-      SerialMon.println(" fail");
-      delay(10000);
-      return;
-    } */
+  delay(3000);
 
+  int intentos = 0;
+  while (!modem.waitForNetwork(15000L))
+  {
+      intentos++;
 
-int intentos = 0;
+      SerialMon.printf("Intento %d fallido\n", intentos);
 
-while (!modem.waitForNetwork(60000L))
-{
-    intentos++;
+      if (intentos >= 2)
+      {
+          SerialMon.println("Reiniciando el módem...");
+          modem.restart();
+          intentos = 0;
+      }
 
-    SerialMon.printf("Intento %d fallido\n", intentos);
+      delay(5000);
+  }
+  
+  SerialMon.println(" success");
 
-    if (intentos >= 5)
-    {
-        SerialMon.println("Reiniciando el módem...");
-        modem.restart();
-        intentos = 0;
-    }
-
-    delay(5000);
-}
-
-
-    SerialMon.println(" success");
-
-    if (modem.isNetworkConnected()) { SerialMon.println("Network connected"); }
-  #if TINY_GSM_USE_GPRS
+  if (modem.isNetworkConnected()) { SerialMon.println("Network connected"); }
+    #if TINY_GSM_USE_GPRS
     // GPRS connection parameters are usually set after network registration
     SerialMon.print(F("Connecting to "));
     SerialMon.print(apn);
@@ -188,7 +283,6 @@ while (!modem.waitForNetwork(60000L))
   #endif
 
   return;
-
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
@@ -213,7 +307,9 @@ boolean mqttConnect() {
     SerialMon.println(" fail");
     SerialMon.print("MQTT state: ");
     SerialMon.println(mqtt.state());
-    return false;
+    SerialMon.println("Probando TCP...");
+    
+  return false;
   }
 
   SerialMon.println(" success");
@@ -387,7 +483,6 @@ void MQTTVerify(){
     if (modem.isNetworkConnected()) {
       SerialMon.println("Network re-connected");
     }
-SerialMon.println("Pausa2");
 
     // and make sure GPRS/EPS is still connected
     if (!modem.isGprsConnected()) {
@@ -449,7 +544,7 @@ void checkForUpdate()
 
     SerialMon.println("Consultando actualización...");
 
-    http.get("/Mareografo-OTA/version.json");
+    http.get(LINK_VERSION);
 
 
     int httpCode = http.responseStatusCode();
@@ -487,7 +582,8 @@ void checkForUpdate()
         if(isNewerVersion(versionNueva, FIRMWARE_VERSION))
         {
             SerialMon.println("Hay una actualización!");
-            // Acá después llamaremos a la función OTA
+           downloadFirmware();
+
         }
         else
         {
@@ -509,6 +605,7 @@ void checkForUpdate()
 void setup() {
   pinMode(12,OUTPUT);
   //pinMode(35, INPUT);
+  //powerOnModem();
   InitUart();
   InitSensors();
   InitModem();
@@ -516,20 +613,37 @@ void setup() {
   mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
   
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  Serial.printf("Running partition: %s\n", running->label);
 }
 
 void loop() {
   SerialMon.println("empezando LOOP");
-  
   digitalWrite(12,HIGH);
-  SerialMon.println("Pausa1");
-  SensadoYenvio();
-  SerialMon.println("Pausa2");
+  SerialMon.println("pausa para que conecte todo bien");
+  delay(10000);
+  
+
   MQTTVerify();
-  SerialMon.println("Pausa3");
+  SensadoYenvio();
+
   digitalWrite(12,LOW);
   mqtt.loop();
-  //checkForUpdate();
+  checkForUpdate();
   
   
 }
+
+ /*OTA.begin(http, "/Mareografo-OTA/Mareografo.bin");
+            OTA.onProgress([](unsigned int progress, unsigned int total) {
+                SerialMon.printf("Progreso: %u%%\n", (progress / (total / 100)));
+            });
+            OTA.onEnd([]() {
+                SerialMon.println("Actualización finalizada!");
+                SerialMon.println("Reiniciando...");
+                delay(1000);
+                ESP.restart();  
+            });
+            OTA.onError([](ota_error_t error) {
+                SerialMon.printf("Error de actualización: %d\n", error);
+            }); */
