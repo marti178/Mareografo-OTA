@@ -42,7 +42,7 @@ jobs:
 
           cat > site/version.json << EOF
           {
-            "version": "1.0.0",
+            "version": "1.0.1",
             "firmware": "firmware.bin"
           }
           EOF
