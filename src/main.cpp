@@ -10,7 +10,7 @@
 #define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
 #define FIRMWARE_VERSION "1.0.1"
 // Select your modem:
-#define TINY_GSM_MODEM_SIM7080 true
+#define TINY_GSM_MODEM_SIM7070 true
 // Set serial 
 #define SerialMon Serial
 #define SerialMaxB Serial1
@@ -115,6 +115,37 @@ bool downloadFirmware()
     SerialMon.print("Firmware: ");
     SerialMon.print(contentLength);
     SerialMon.println(" bytes");
+    mqtt.disconnect();
+    client.stop();      // el cliente MQTT
+    SerialMon.println("===== INFO RED =====");
+
+    SerialMon.print("Operador: ");
+    SerialMon.println(modem.getOperator());
+
+    SerialMon.print("Señal (CSQ): ");
+    SerialMon.println(modem.getSignalQuality());
+
+    SerialMon.print("Modem: ");
+    SerialMon.println(modem.getModemInfo());
+
+    SerialMon.print("Conectado a red: ");
+    SerialMon.println(modem.isNetworkConnected() ? "SI" : "NO");
+
+    SerialMon.print("GPRS conectado: ");
+    SerialMon.println(modem.isGprsConnected() ? "SI" : "NO");
+
+    SerialMon.print("IP: ");
+    SerialMon.println(modem.localIP());
+
+    SerialMon.println("====================");
+    SerialMon.println("===== INFO CELDA =====");
+
+    modem.sendAT("+CPSI?");
+    String resp;
+    modem.waitResponse(5000, resp);
+
+    SerialMon.println(resp);
+    SerialMon.println("======================");
 
     if (!Update.begin(contentLength))
     {
@@ -123,19 +154,91 @@ bool downloadFirmware()
         return false;
     }
 
-    uint8_t buffer[1024];
+    uint8_t buffer[1512];
 
     size_t written = 0;
     int lastPercent = -1;
 
+
+    uint32_t otaStartTime = millis();
+
+    uint32_t lastDataTime = millis();
+
     while (written < contentLength)
+    {
+        int available = http.available();
+
+        if (available > 0)
+        {
+            int toRead = min((int)sizeof(buffer), available);
+
+            uint32_t tRead = millis();
+            int len = http.read(buffer, toRead);
+
+            if (len > 0)
+            {
+                lastDataTime = millis();
+
+                size_t writtenFlash = Update.write(buffer, len);
+
+                if (writtenFlash != (size_t)len)
+                {
+                    SerialMon.println("ERROR escribiendo flash");
+                    Update.abort();
+                    http.stop();
+                    return false;
+                }
+
+                written += len;
+
+                int percent = (written * 100) / contentLength;
+
+                if (percent != lastPercent)
+                {
+                    lastPercent = percent;
+
+                    float speedKB = (written / 1024.0) /
+                                    ((millis() - otaStartTime) / 1000.0);
+
+                    SerialMon.printf(
+                        "OTA %d%% | %d/%d bytes | %.2f KB/s\n",
+                        percent,
+                        written,
+                        contentLength,
+                        speedKB
+                    );
+                }
+            }
+        }
+        else
+        {
+            // Si pasan 30 segundos sin recibir nada, abortar
+            if (millis() - lastDataTime > 300000)
+            {
+                SerialMon.println("TIMEOUT: 3000 segundos sin datos");
+
+                Update.abort();
+                http.stop();
+
+                return false;
+            }
+            // Esperar un poco más entre consultas evita saturar el canal AT
+            // del módem durante las pausas reales de red.
+            delay(100);
+            continue;
+        }
+
+        delay(1);
+    }
+
+    /*while (written < contentLength)
     {
         int available = http.available();
 
         if (available)
         {
             int len = http.readBytes(buffer, min((int)sizeof(buffer), available));
-
+            Serial.printf("len=%d\n", len);
             if (len > 0)
             {
                 if (Update.write(buffer, len) != (size_t)len)
@@ -159,7 +262,7 @@ bool downloadFirmware()
         }
 
         delay(1);
-    }
+    }*/
 
     http.stop();
 
@@ -203,7 +306,7 @@ void InitUart(void){
   // Set console baud rate
   SerialMon.begin(115200);
   delay(1000);
-  SerialAT.begin(9600,SERIAL_8N1,26,27);
+  SerialAT.begin(921600, SERIAL_8N1, 26, 27);
   delay(1000);
   SerialMaxB.begin(9600,SERIAL_8N1,DATAIN);
   delay(1000);
@@ -238,9 +341,15 @@ void InitModem(void){
   //modem.init();
   delay(6000); 
   SerialMon.println("Configurando modem... ");
-  modem.setPreferredMode(3); //Mode NB-Iot lo 
+  modem.setPreferredMode(1); //Mode NB-Iot lo 
   delay(3000);
-
+  // Fijar baudrate (sin autobaud) — lo repetimos en cada boot, no dependemos de &W
+  /*modem.sendAT("+IPR=921600");
+  modem.waitResponse();
+  delay(200);
+  // Recién ahora subimos el UART local
+  SerialAT.updateBaudRate(921600);
+  delay(500);*/
   String modemInfo = modem.getModemInfo();
   SerialMon.print("Modem Info: ");
   SerialMon.println(modemInfo);
@@ -633,17 +742,3 @@ void loop() {
   
   
 }
-
- /*OTA.begin(http, "/Mareografo-OTA/Mareografo.bin");
-            OTA.onProgress([](unsigned int progress, unsigned int total) {
-                SerialMon.printf("Progreso: %u%%\n", (progress / (total / 100)));
-            });
-            OTA.onEnd([]() {
-                SerialMon.println("Actualización finalizada!");
-                SerialMon.println("Reiniciando...");
-                delay(1000);
-                ESP.restart();  
-            });
-            OTA.onError([](ota_error_t error) {
-                SerialMon.printf("Error de actualización: %d\n", error);
-            }); */
