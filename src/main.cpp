@@ -719,14 +719,15 @@ void checkForUpdate()
 
 
 void setup() {
-  const esp_partition_t* running = esp_ota_get_running_partition();
-  Serial.printf("Running partition: %s\n", running->label);
   pinMode(12,OUTPUT);
   //pinMode(35, INPUT);
   //powerOnModem();
   InitUart();
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  Serial.printf("Running partition: %s\n", running->label);
   InitSensors();
   InitModem();
+  
   // MQTT Broker setup
   mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
@@ -735,17 +736,15 @@ void setup() {
 }
 
 void loop() {
-  SerialMon.println("empezando LOOP");
-  digitalWrite(12,HIGH);
-  delay(100);
-  
+    SerialMon.println("empezando LOOP");
+    digitalWrite(12,HIGH);
+    MQTTVerify();
+    mqtt.publish("mareografo/debug", "voy a sensar y enviar datos");
+    SensadoYenvio();
+    mqtt.publish("mareografo/debug", "envié datos");
+    digitalWrite(12,LOW);
+    mqtt.publish("mareografo/debug", "voy a checkear si hay actualizacion de firmware");
+    checkForUpdate();
 
-  MQTTVerify();
-  SensadoYenvio();
-
-  digitalWrite(12,LOW);
   mqtt.loop();
-  checkForUpdate();
-  
-  
 }
