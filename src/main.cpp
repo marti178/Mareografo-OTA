@@ -8,7 +8,7 @@
 //Define Version of TinyGSM
 #define LINK_BIN "https://marti178.github.io/Mareografo-OTA/firmware.bin"
 #define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "1.0.2"
 // Select your modem:
 #define TINY_GSM_MODEM_SIM7070 true
 // Set serial 
@@ -207,6 +207,7 @@ bool downloadFirmware()
                         contentLength,
                         speedKB
                     );
+                    SerialMon.println(" ");
                 }
             }
         }
@@ -341,7 +342,7 @@ void InitModem(void){
   //modem.init();
   delay(6000); 
   SerialMon.println("Configurando modem... ");
-  modem.setPreferredMode(1); //Mode NB-Iot lo 
+  modem.setPreferredMode(2); //Mode NB-Iot lo 
   delay(3000);
   // Fijar baudrate (sin autobaud) — lo repetimos en cada boot, no dependemos de &W
   /*modem.sendAT("+IPR=921600");
@@ -562,7 +563,9 @@ void SensadoYenvio()
     SerialMon.println(" metros "); 
     //Lectura de senial
     csq = modem.getSignalQuality();
-    //Lesto estado de bateria
+    SerialMon.print("Senial: ");
+    SerialMon.println(csq);
+    //Listo estado de bateria
     bat=analogRead(35);
     bat=bat*2;
     //Conversion de datos
