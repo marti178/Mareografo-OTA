@@ -8,7 +8,7 @@
 //Define Version of TinyGSM
 #define LINK_BIN "https://marti178.github.io/Mareografo-OTA/firmware.bin"
 #define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
-#define FIRMWARE_VERSION "1.0.2"
+#define FIRMWARE_VERSION "1.0.3"
 // Select your modem:
 #define TINY_GSM_MODEM_SIM7070 true
 // Set serial 
