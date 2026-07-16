@@ -342,7 +342,7 @@ void InitModem(void){
   //modem.init();
   delay(6000); 
   SerialMon.println("Configurando modem... ");
-  modem.setPreferredMode(2); //Mode NB-Iot lo 
+  modem.setPreferredMode(1); //Mode NB-Iot lo 
   delay(3000);
   // Fijar baudrate (sin autobaud) — lo repetimos en cada boot, no dependemos de &W
   /*modem.sendAT("+IPR=921600");
@@ -543,35 +543,38 @@ void SensadoYenvio()
     char bateria[10];
     int bat;
     int Time=0;
+    SerialMon.println("Lectura de datos");
+    SerialMon.println("=====================");
     //Lectura de la presion
     pres= getPressure();
     SerialMon.print("Presion: ");
     SerialMon.print(pres);
-    SerialMon.print(" mb ");  
+    SerialMon.println(" mb ");  
     delay(1000);
     //Lectura de temperatura
     Time=pressure.startTemperature();
     delay(Time);
     pressure.getTemperature(temp);
-    SerialMon.print(temp);
-    SerialMon.print(" grados ");  
-    delay(1000);
+    SerialMon.print("Grados: ");
+    SerialMon.println(temp);
+        delay(1000);
     //Lectura de distancia
-    SerialMon.print(" distancia: ");
     SensorRead(dist);
+    SerialMon.print("Distancia: ");
     SerialMon.print(dist);
     SerialMon.println(" metros "); 
     //Lectura de senial
     csq = modem.getSignalQuality();
     SerialMon.print("Senial: ");
     SerialMon.println(csq);
+    SerialMon.println("=====================");
     //Listo estado de bateria
     bat=analogRead(35);
     bat=bat*2;
     //Conversion de datos
     sprintf(presion,"%f",pres);
     sprintf(temperatura,"%f",temp);
-    itoa(csq,signal,6);
+    itoa(csq,signal,10);
     itoa(bat,bateria,10);
     //Envio de datos
     mqtt.publish(topicDistancia,dist);
@@ -584,7 +587,6 @@ void SensadoYenvio()
 
 void MQTTVerify(){
     // Make sure we're still registered on the network
-    SerialMon.println("Pausa2");
   if (!modem.isNetworkConnected()) {
     SerialMon.println("Network disconnected");
     if (!modem.waitForNetwork(180000L, true)) {
@@ -612,13 +614,15 @@ void MQTTVerify(){
   }
 if (!mqtt.connected())
 {
+    SerialMon.println("====== MQTT disconnected ========");
     if (lastReconnectAttempt == 0 ||
         millis() - lastReconnectAttempt >= 10000UL)
     {
         lastReconnectAttempt = millis();
 
         if (mqttConnect())
-        {
+        {   
+            SerialMon.println("====== MQTT Reconnected ========");
             lastReconnectAttempt = 0;
         }
     }
@@ -715,6 +719,8 @@ void checkForUpdate()
 
 
 void setup() {
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  Serial.printf("Running partition: %s\n", running->label);
   pinMode(12,OUTPUT);
   //pinMode(35, INPUT);
   //powerOnModem();
@@ -725,15 +731,13 @@ void setup() {
   mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
   
-  const esp_partition_t* running = esp_ota_get_running_partition();
-  Serial.printf("Running partition: %s\n", running->label);
+
 }
 
 void loop() {
   SerialMon.println("empezando LOOP");
   digitalWrite(12,HIGH);
-  SerialMon.println("pausa para que conecte todo bien");
-  delay(10000);
+  delay(100);
   
 
   MQTTVerify();
