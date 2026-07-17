@@ -103,7 +103,10 @@ void debugLog(const char* format, ...)
 }
 
 bool downloadFirmware()
-{
+{   
+    mqtt.disconnect();
+    client.stop();      // el cliente MQTT
+    yield();
     SerialMon.println("Descargando firmware...");
 
     http.get(LINK_BIN);
@@ -130,8 +133,7 @@ bool downloadFirmware()
     SerialMon.print("Firmware: ");
     SerialMon.print(contentLength);
     SerialMon.println(" bytes");
-    //mqtt.disconnect();
-    //client.stop();      // el cliente MQTT
+
     SerialMon.println("===== INFO RED =====");
     
     SerialMon.print("Operador: ");
@@ -222,14 +224,7 @@ bool downloadFirmware()
                         contentLength,
                         speedKB
                     );
-                    SerialMon.println(" ");
-                    debugLog(
-                    "OTA %d%% | %d/%d bytes | %.2f KB/s",
-                    percent,
-                    written,
-                    contentLength,
-                    speedKB
-                    );
+
                 }
 
             }
@@ -320,6 +315,8 @@ void powerOnModem()
   digitalWrite(MODEM_POWER_KEY, LOW);
   delay(1100);
   digitalWrite(MODEM_POWER_KEY, HIGH);
+
+  pinMode(MODEM_POWER_KEY, INPUT);
 }
 
 void InitUart(void){
@@ -744,7 +741,7 @@ void checkForUpdate()
 void setup() {
   pinMode(12,OUTPUT);
   //pinMode(35, INPUT);
-  //powerOnModem();
+  powerOnModem();
   InitUart();
   const esp_partition_t* running = esp_ota_get_running_partition();
   Serial.printf("Running partition: %s\n", running->label);
