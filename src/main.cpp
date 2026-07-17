@@ -131,7 +131,7 @@ bool downloadFirmware()
     SerialMon.print(contentLength);
     SerialMon.println(" bytes");
     mqtt.disconnect();
-    client.stop();      // el cliente MQTT
+    //client.stop();      // el cliente MQTT
     SerialMon.println("===== INFO RED =====");
     
     SerialMon.print("Operador: ");
