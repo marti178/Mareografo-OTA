@@ -8,7 +8,7 @@
 //Define Version of TinyGSM
 #define LINK_BIN "https://marti178.github.io/Mareografo-OTA/firmware.bin"
 #define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
-#define FIRMWARE_VERSION "1.0.3"
+#define FIRMWARE_VERSION "1.0.4"
 // Select your modem:
 #define TINY_GSM_MODEM_SIM7070 true
 // Set serial 
@@ -87,6 +87,21 @@ SFE_BMP180 pressure;
 double temp;
 double pres;
 
+void debugLog(const char* format, ...)
+{
+    char buffer[256];
+
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    SerialMon.println(buffer);
+
+    if (mqtt.connected())
+        mqtt.publish("mareografo/debug", buffer);
+}
+
 bool downloadFirmware()
 {
     SerialMon.println("Descargando firmware...");
@@ -118,7 +133,7 @@ bool downloadFirmware()
     mqtt.disconnect();
     client.stop();      // el cliente MQTT
     SerialMon.println("===== INFO RED =====");
-
+    
     SerialMon.print("Operador: ");
     SerialMon.println(modem.getOperator());
 
@@ -208,7 +223,15 @@ bool downloadFirmware()
                         speedKB
                     );
                     SerialMon.println(" ");
+                    debugLog(
+                    "OTA %d%% | %d/%d bytes | %.2f KB/s",
+                    percent,
+                    written,
+                    contentLength,
+                    speedKB
+                    );
                 }
+
             }
         }
         else
@@ -725,6 +748,7 @@ void setup() {
   InitUart();
   const esp_partition_t* running = esp_ota_get_running_partition();
   Serial.printf("Running partition: %s\n", running->label);
+
   InitSensors();
   InitModem();
   
@@ -739,6 +763,7 @@ void loop() {
     SerialMon.println("empezando LOOP");
     digitalWrite(12,HIGH);
     MQTTVerify();
+    debugLog("Firmware version: %s", FIRMWARE_VERSION);
     mqtt.publish("mareografo/debug", "voy a sensar y enviar datos");
     SensadoYenvio();
     mqtt.publish("mareografo/debug", "envié datos");
