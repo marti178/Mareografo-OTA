@@ -103,8 +103,8 @@ void debugLog(const char* format, ...)
 
 bool downloadFirmware()
 {   
-    mqtt.disconnect();
-    client.stop();      // el cliente MQTT
+    //mqtt.disconnect();
+    //client.stop();      // el cliente MQTT
     yield();
     SerialMon.println("Descargando firmware...");
 
@@ -170,7 +170,7 @@ bool downloadFirmware()
         return false;
     }
 
-    uint8_t buffer[1512];
+    uint8_t buffer[5000];
 
     size_t written = 0;
     int lastPercent = -1;
@@ -231,6 +231,8 @@ bool downloadFirmware()
                         contentLength,
                         speedKB
                     );
+                    mqtt.loop();
+                    delay(100);
                 }
 
             }
@@ -249,7 +251,7 @@ bool downloadFirmware()
             }
             // Esperar un poco más entre consultas evita saturar el canal AT
             // del módem durante las pausas reales de red.
-            delay(100);
+            delay(10);
             continue;
         }
 
