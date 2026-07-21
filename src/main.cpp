@@ -96,8 +96,7 @@ void debugLog(const char* format, ...)
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
 
-    SerialMon.println(buffer);
-
+    
     if (mqtt.connected())
         mqtt.publish("mareografo/debug", buffer);
 }
@@ -224,7 +223,14 @@ bool downloadFirmware()
                         contentLength,
                         speedKB
                     );
-
+                    
+                    debugLog(
+                        "OTA %d%% | %d/%d bytes | %.2f KB/s",
+                        percent,
+                        written,
+                        contentLength,
+                        speedKB
+                    );
                 }
 
             }
@@ -410,6 +416,17 @@ void InitModem(void){
     }
     SerialMon.println(" success");
     if (modem.isGprsConnected()) { SerialMon.println("GPRS connected"); }
+
+    // Desactivar PSM y eDRX: si quedan habilitados, el modem puede
+    // "dormirse" solo en medio de una transferencia larga (como la
+    // descarga OTA) y quedarse sin recibir datos varios segundos/minutos
+    // hasta el próximo ciclo de paging, aunque la red y la señal estén bien.
+    modem.sendAT("+CPSMS=0");
+    modem.waitResponse();
+    delay(200);
+    modem.sendAT("+CEDRXS=0");
+    modem.waitResponse();
+    delay(200);
   #endif
 
   return;
