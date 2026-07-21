@@ -170,7 +170,7 @@ bool downloadFirmware()
         return false;
     }
 
-    uint8_t buffer[5000];
+    uint8_t *buffer = (uint8_t *)malloc(5000);
 
     size_t written = 0;
     int lastPercent = -1;
@@ -232,7 +232,7 @@ bool downloadFirmware()
                         speedKB
                     );
                     mqtt.loop();
-                    delay(100);
+                    delay(500); // Evitar saturar el canal AT del módem
                 }
 
             }
@@ -308,7 +308,7 @@ bool downloadFirmware()
 
     SerialMon.println("OTA finalizada correctamente");
     delay(1000);
-
+    free(buffer);
     ESP.restart();
 
     return true;
