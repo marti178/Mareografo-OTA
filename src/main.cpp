@@ -17,6 +17,7 @@
 #define SerialAT Serial2
 #define TINY_GSM_USE_GPRS true
 #define TINY_GSM_USE_WIFI false
+#define MODE_GPRS 1
 
 // Your GPRS credentials, if any
 const char apn[]      = "igprs.claro.com.ar";
@@ -69,7 +70,6 @@ TinyGsm        modem(SerialAT);
 #endif
 TinyGsmClient client(modem,0);
 PubSubClient  mqtt(client);
-TinyGsmClient test(modem, 1);
 
 TinyGsmClientSecure otaClient(modem,2);
     HttpClient http(
@@ -96,7 +96,6 @@ boolean mqttConnect() {
     SerialMon.println(" fail");
     SerialMon.print("MQTT state: ");
     SerialMon.println(mqtt.state());
-    SerialMon.println("Probando TCP...");
     
   return false;
   }
@@ -198,11 +197,11 @@ bool downloadFirmware()
     // red te hace perder todo), pedimos el archivo en pedacitos chicos,
     // cada uno con su propia conexión y su propio timeout corto. Si un
     // bloque falla, se reintenta SOLO ese bloque, no el archivo entero.
-    const size_t CHUNK_SIZE            = 50000; // cuanto pedimos por vez (ajustable)
-    const uint32_t STALL_TIMEOUT       = 15000;  // 15s sin datos = damos el intento por trabado
+    //const size_t CHUNK_SIZE            = 50000; // cuanto pedimos por vez (ajustable)
+    const uint32_t STALL_TIMEOUT       = 3000;  // 10s sin datos = damos el intento por trabado
     const int MAX_FALLOS_SEGUIDOS      = 8;       // reintentos SIN progreso antes de rendirnos
  
-    uint8_t buffer[1024];
+    uint8_t buffer[3000];
     size_t written        = 0;   // SIEMPRE = bytes realmente grabados en flash hasta ahora (fuente de verdad)
     int lastPercent       = -1;
     uint32_t otaStart     = millis();
@@ -214,7 +213,7 @@ bool downloadFirmware()
     // nunca puede volver a pedir (ni duplicar) algo que ya se escribió.
     while (written < contentLength)
     {
-        size_t wantLen  = min(CHUNK_SIZE, contentLength - written);
+        size_t wantLen  = contentLength - written;
         size_t rangeEnd = written + wantLen - 1;
  
         yield();
@@ -309,9 +308,36 @@ bool downloadFirmware()
                     recibidoEstePedido  += len;
                     lastData             = millis();
                     fallosSeguidos        = 0; // si progresamos, reseteamos el contador de fallos
+
+
+                                        // Pedido completo: este es el hueco seguro para loguear y avisar
+                    // por MQTT (la conexión OTA ya está cerrada acá).
+                    int percent = (written * 100) / contentLength;
+                    float speedKB = (written / 1024.0) / ((millis() - otaStart) / 1000.0);
+            
+                    SerialMon.printf("Bloque OK | total %d/%d (%d%%) | %.2f KB/s\n",
+                                    (int)written, (int)contentLength, percent, speedKB);
+            
+                    char mqttMsg[64];
+                    snprintf(mqttMsg, sizeof(mqttMsg), "OTA %d%% (%d/%d bytes, %.2f KB/s)", percent, (int)written, (int)contentLength, speedKB);
+            
+                    // Dejamos el MQTT CONECTADO entre bloques (no lo desconectamos más).
+                    // Solo lo reconectamos si de verdad se cayó (p.ej. el broker lo cerró
+                    // por keepalive). Esto ahorra el handshake completo en cada bloque.
+                    if (!mqtt.connected())
+                    {
+                        mqttConnect();
+                    }
+                    if (mqtt.connected())
+                    {
+                        mqtt.publish("mareografo/debug", mqttMsg);
+                        mqtt.loop(); // procesa el PING/ACK de este publish, todavía en el hueco seguro
+                    }
+    
+                    lastPercent = percent;
                 }
             }
-            else
+                else
             {
                 if (millis() - lastData > STALL_TIMEOUT)
                 {
@@ -321,7 +347,7 @@ bool downloadFirmware()
                 delay(50);
             }
         }
- 
+    
         http.stop();
         delay(100);
  
@@ -339,31 +365,7 @@ bool downloadFirmware()
             continue; // pide desde el 'written' YA actualizado (lo recibido antes del stall no se pierde ni se duplica)
         }
  
-        // Pedido completo: este es el hueco seguro para loguear y avisar
-        // por MQTT (la conexión OTA ya está cerrada acá).
-        int percent = (written * 100) / contentLength;
-        float speedKB = (written / 1024.0) / ((millis() - otaStart) / 1000.0);
- 
-        SerialMon.printf("Bloque OK | total %d/%d (%d%%) | %.2f KB/s\n",
-                          (int)written, (int)contentLength, percent, speedKB);
- 
-        char mqttMsg[64];
-        snprintf(mqttMsg, sizeof(mqttMsg), "OTA %d%% (%d/%d bytes, %.2f KB/s)", percent, (int)written, (int)contentLength, speedKB);
- 
-        // Dejamos el MQTT CONECTADO entre bloques (no lo desconectamos más).
-        // Solo lo reconectamos si de verdad se cayó (p.ej. el broker lo cerró
-        // por keepalive). Esto ahorra el handshake completo en cada bloque.
-        if (!mqtt.connected())
-        {
-            mqttConnect();
-        }
-        if (mqtt.connected())
-        {
-            mqtt.publish("mareografo/debug", mqttMsg);
-            mqtt.loop(); // procesa el PING/ACK de este publish, todavía en el hueco seguro
-        }
- 
-        lastPercent = percent;
+
     }
  
     http.stop();
@@ -437,7 +439,7 @@ void InitSensors(){
 
 void InitModem(void){
   
-  //powerOnModem();
+  powerOnModem();
   // Restart takes quite some time
   // To skip it, call init() instead of restart()
   SerialMon.println("Initializing modem... ");
@@ -445,7 +447,7 @@ void InitModem(void){
   //modem.init();
   delay(6000); 
   SerialMon.println("Configurando modem... ");
-  modem.setPreferredMode(1); //Mode NB-Iot lo 
+  modem.setPreferredMode(MODE_GPRS); //Mode NB-Iot lo 
   delay(3000);
   // Fijar baudrate (sin autobaud) — lo repetimos en cada boot, no dependemos de &W
   /*modem.sendAT("+IPR=921600");
@@ -817,7 +819,6 @@ void checkForUpdate()
 void setup() {
   pinMode(12,OUTPUT);
   //pinMode(35, INPUT);
-  powerOnModem();
   InitUart();
   const esp_partition_t* running = esp_ota_get_running_partition();
   Serial.printf("Running partition: %s\n", running->label);
