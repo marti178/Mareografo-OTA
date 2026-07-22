@@ -18,6 +18,7 @@
 #define TINY_GSM_USE_GPRS true
 #define TINY_GSM_USE_WIFI false
 #define MODE_GPRS 1
+#define ADC_PIN 35
 
 // Your GPRS credentials, if any
 const char apn[]      = "igprs.claro.com.ar";
@@ -522,8 +523,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   }
 }
 
-
-
 double getPressure() //Retorna la presion en mb
 {
   char status;
@@ -628,6 +627,18 @@ void SensorRead(char *dist){
     
     } 
 
+void batteryRead(char *bateria){
+    uint16_t v = analogRead(ADC_PIN);
+    float battery_voltage = ((float)v / 4095.0) * 2.0 * 3.3 * (1100/ 1000.0);
+    strcpy(bateria, ("Voltage :" + String(battery_voltage) + "V\n").c_str());
+
+    // When connecting USB, the battery detection will return 0,
+    // because the adc detection circuit is disconnected when connecting USB
+    Serial.println(bateria);
+    if (strcmp(bateria, "Voltage :0.00V\n") == 0) {
+        Serial.println("USB is connected, please disconnect USB.");
+    }
+}
 void SensadoYenvio()
 {
     int csq;
@@ -653,7 +664,7 @@ void SensadoYenvio()
     pressure.getTemperature(temp);
     SerialMon.print("Grados: ");
     SerialMon.println(temp);
-        delay(1000);
+    delay(1000);
     //Lectura de distancia
     SensorRead(dist);
     SerialMon.print("Distancia: ");
@@ -664,14 +675,12 @@ void SensadoYenvio()
     SerialMon.print("Senial: ");
     SerialMon.println(csq);
     SerialMon.println("=====================");
-    //Listo estado de bateria
-    bat=analogRead(35);
-    bat=bat*2;
+    //Estado de bateria
+    batteryRead(bateria);
     //Conversion de datos
     sprintf(presion,"%f",pres);
     sprintf(temperatura,"%f",temp);
     itoa(csq,signal,10);
-    itoa(bat,bateria,10);
     //Envio de datos
     mqtt.publish(topicDistancia,dist);
     mqtt.publish(topicPresion,presion);
@@ -836,7 +845,6 @@ void loop() {
     SerialMon.println("empezando LOOP");
     digitalWrite(12,HIGH);
     MQTTVerify();
-    debugLog("Firmware version: %s", FIRMWARE_VERSION);
     mqtt.publish("mareografo/debug", "voy a sensar y enviar datos");
     SensadoYenvio();
     mqtt.publish("mareografo/debug", "envié datos");
