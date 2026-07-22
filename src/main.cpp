@@ -87,6 +87,26 @@ SFE_BMP180 pressure;
 double temp;
 double pres;
 
+boolean mqttConnect() {
+  SerialMon.print("Connecting to ");
+  SerialMon.print(broker);
+  boolean status = mqtt.connect(broker, "aquaman1", "P0s31d0n1");
+
+  if (status == false) {
+    SerialMon.println(" fail");
+    SerialMon.print("MQTT state: ");
+    SerialMon.println(mqtt.state());
+    SerialMon.println("Probando TCP...");
+    
+  return false;
+  }
+
+  SerialMon.println(" success");
+  mqtt.publish(topicInit, "Aquaman1 started");
+  mqtt.subscribe(topicAquaman1);
+  return mqtt.connected();
+}
+
 void debugLog(const char* format, ...)
 {
     char buffer[256];
@@ -107,11 +127,11 @@ bool downloadFirmware()
     //client.stop();      // el cliente MQTT
     yield();
     SerialMon.println("Descargando firmware...");
-
+ 
     http.get(LINK_BIN);
-
+ 
     int statusCode = http.responseStatusCode();
-
+ 
     if (statusCode != 200)
     {
         SerialMon.print("HTTP Error: ");
@@ -119,200 +139,256 @@ bool downloadFirmware()
         http.stop();
         return false;
     }
-
+ 
     int contentLength = http.contentLength();
-
+    http.stop();  // cerramos YA esta conexión: no queremos dejar el body
+                  // del archivo esperando sin leer mientras hacemos abajo
+                  // varias consultas AT lentas (CPSI puede tardar 5s).
+    delay(300);
+ 
     if (contentLength <= 0)
     {
         SerialMon.println("Content-Length inválido");
-        http.stop();
         return false;
     }
-
+ 
     SerialMon.print("Firmware: ");
     SerialMon.print(contentLength);
     SerialMon.println(" bytes");
-
+ 
     SerialMon.println("===== INFO RED =====");
     
     SerialMon.print("Operador: ");
     SerialMon.println(modem.getOperator());
-
+ 
     SerialMon.print("Señal (CSQ): ");
     SerialMon.println(modem.getSignalQuality());
-
+ 
     SerialMon.print("Modem: ");
     SerialMon.println(modem.getModemInfo());
-
+ 
     SerialMon.print("Conectado a red: ");
     SerialMon.println(modem.isNetworkConnected() ? "SI" : "NO");
-
+ 
     SerialMon.print("GPRS conectado: ");
     SerialMon.println(modem.isGprsConnected() ? "SI" : "NO");
-
+ 
     SerialMon.print("IP: ");
     SerialMon.println(modem.localIP());
-
+ 
     SerialMon.println("====================");
     SerialMon.println("===== INFO CELDA =====");
-
+ 
     modem.sendAT("+CPSI?");
     String resp;
     modem.waitResponse(5000, resp);
-
+ 
     SerialMon.println(resp);
     SerialMon.println("======================");
-
+ 
     if (!Update.begin(contentLength))
     {
         SerialMon.println("No hay espacio suficiente para OTA");
         http.stop();
         return false;
     }
-
-    uint8_t *buffer = (uint8_t *)malloc(5000);
-
-    size_t written = 0;
-    int lastPercent = -1;
-
-
-    uint32_t otaStartTime = millis();
-
-    uint32_t lastDataTime = millis();
-
+ 
+    // --- Descarga por bloques (Range) ---
+    // En vez de UNA sesión de varios minutos (frágil: cualquier bache de
+    // red te hace perder todo), pedimos el archivo en pedacitos chicos,
+    // cada uno con su propia conexión y su propio timeout corto. Si un
+    // bloque falla, se reintenta SOLO ese bloque, no el archivo entero.
+    const size_t CHUNK_SIZE            = 16384; // 16KB por pedido
+    const uint32_t CHUNK_STALL_TIMEOUT = 15000;  // 15s sin datos = reintentar el bloque
+    const int MAX_RETRIES_PER_CHUNK    = 6;
+ 
+    uint8_t buffer[1024];
+    size_t written    = 0;
+    int lastPercent   = -1;
+    uint32_t otaStart = millis();
+ 
     while (written < contentLength)
     {
-        int available = http.available();
-
-        if (available > 0)
+        size_t thisChunkLen = min(CHUNK_SIZE, contentLength - written);
+        size_t rangeEnd     = written + thisChunkLen - 1;
+ 
+        bool chunkOk = false;
+        int retries  = 0;
+ 
+        while (!chunkOk && retries < MAX_RETRIES_PER_CHUNK)
         {
-            int toRead = min((int)sizeof(buffer), available);
-
-            uint32_t tRead = millis();
-            int len = http.read(buffer, toRead);
-
-            if (len > 0)
+            yield();
+            http.stop();
+            delay(200);
+ 
+            String rangeHeader = "bytes=" + String(written) + "-" + String(rangeEnd);
+ 
+            http.beginRequest();
+            http.get(LINK_BIN);
+            http.sendHeader("Range", rangeHeader);
+            http.endRequest();
+ 
+            int chunkStatus = http.responseStatusCode();
+ 
+            // Si el servidor no respeta el Range (devuelve 200 en vez de
+            // 206 para un pedido que no arranca en el byte 0), no se puede
+            // hacer descarga por partes con este hosting: mejor abortar
+            // claramente en vez de escribir bytes equivocados en la flash.
+            if (written > 0 && chunkStatus == 200)
             {
-                lastDataTime = millis();
-
-                size_t writtenFlash = Update.write(buffer, len);
-
-                if (writtenFlash != (size_t)len)
-                {
-                    SerialMon.println("ERROR escribiendo flash");
-                    Update.abort();
-                    http.stop();
-                    return false;
-                }
-
-                written += len;
-
-                int percent = (written * 100) / contentLength;
-
-                if (percent != lastPercent)
-                {
-                    lastPercent = percent;
-
-                    float speedKB = (written / 1024.0) /
-                                    ((millis() - otaStartTime) / 1000.0);
-
-                    SerialMon.printf(
-                        "OTA %d%% | %d/%d bytes | %.2f KB/s\n",
-                        percent,
-                        written,
-                        contentLength,
-                        speedKB
-                    );
-                    
-                    debugLog(
-                        "OTA %d%% | %d/%d bytes | %.2f KB/s",
-                        percent,
-                        written,
-                        contentLength,
-                        speedKB
-                    );
-                    mqtt.loop();
-                    delay(500); // Evitar saturar el canal AT del módem
-                }
-
-            }
-        }
-        else
-        {
-            // Si pasan 30 segundos sin recibir nada, abortar
-            if (millis() - lastDataTime > 300000)
-            {
-                SerialMon.println("TIMEOUT: 3000 segundos sin datos");
-
+                SerialMon.println("El servidor no soporta Range (HTTP 200 en vez de 206). No se puede reanudar por bloques con este hosting.");
                 Update.abort();
                 http.stop();
-
                 return false;
             }
-            // Esperar un poco más entre consultas evita saturar el canal AT
-            // del módem durante las pausas reales de red.
-            delay(10);
-            continue;
-        }
-
-        delay(1);
-    }
-
-    /*while (written < contentLength)
-    {
-        int available = http.available();
-
-        if (available)
-        {
-            int len = http.readBytes(buffer, min((int)sizeof(buffer), available));
-            Serial.printf("len=%d\n", len);
-            if (len > 0)
+ 
+            if (chunkStatus != 206 && chunkStatus != 200)
             {
-                if (Update.write(buffer, len) != (size_t)len)
+                SerialMon.printf("Bloque fallo (HTTP %d), reintento %d/%d\n", chunkStatus, retries + 1, MAX_RETRIES_PER_CHUNK);
+                retries++;
+                delay(3000);
+                continue;
+            }
+ 
+            // CLAVE: hay que descartar los headers de la respuesta antes
+            // de leer el body. Sin esto, available()/read() devuelven los
+            // headers HTTP crudos (Connection, Content-Length, Server...)
+            // como si fueran el contenido del archivo.
+            http.skipResponseHeaders();
+ 
+            size_t chunkWritten     = 0;
+            uint32_t chunkLastData  = millis();
+            bool chunkTimedOut      = false;
+ 
+            while (chunkWritten < thisChunkLen)
+            {
+                int available = http.available();
+ 
+                if (available > 0)
                 {
-                    SerialMon.println("Error escribiendo flash");
-                    Update.abort();
-                    http.stop();
-                    return false;
+                    size_t want = min((size_t)sizeof(buffer), thisChunkLen - chunkWritten);
+                    int toRead  = min((size_t)available, want);
+                    int len     = http.read(buffer, toRead);
+ 
+                    // DIAGNÓSTICO: mostramos en hex los primeros bytes
+                    // que llegan del primerísimo bloque, para ver si es
+                    // el header real de un firmware ESP32 (debería
+                    // arrancar con E9) o si se coló otra cosa (texto de
+                    // headers HTTP, HTML de error, etc).
+                    if (written == 0 && chunkWritten == 0 && len > 0)
+                    {
+                        SerialMon.print("Primeros bytes recibidos (hex): ");
+                        for (int i = 0; i < min(len, 16); i++)
+                        {
+                            SerialMon.printf("%02X ", buffer[i]);
+                        }
+                        SerialMon.println();
+                        SerialMon.print("Como texto: ");
+                        for (int i = 0; i < min(len, 64); i++)
+                        {
+                            char c = (char)buffer[i];
+                            SerialMon.print((c >= 32 && c <= 126) ? c : '.');
+                        }
+                        SerialMon.println();
+                    }
+ 
+                    if (len > 0)
+                    {
+                        if (Update.write(buffer, len) != (size_t)len)
+                        {
+                            SerialMon.print("ERROR escribiendo flash: ");
+                            SerialMon.println(Update.errorString());
+                            Update.abort();
+                            http.stop();
+                            return false;
+                        }
+                        chunkWritten   += len;
+                        chunkLastData  = millis();
+                    }
                 }
-
-                written += len;
-
-                int percent = (written * 100) / contentLength;
-
-                if (percent != lastPercent)
+                else
                 {
-                    lastPercent = percent;
-                    SerialMon.printf("OTA %d%%\n", percent);
+                    if (millis() - chunkLastData > CHUNK_STALL_TIMEOUT)
+                    {
+                        chunkTimedOut = true;
+                        break;
+                    }
+                    delay(50);
                 }
             }
+ 
+            if (chunkTimedOut)
+            {
+                SerialMon.printf("Timeout en bloque (byte %d), reintento %d/%d\n", (int)written, retries + 1, MAX_RETRIES_PER_CHUNK);
+                retries++;
+                delay(3000);
+                continue; // reintenta el MISMO bloque, 'written' no avanzó
+            }
+ 
+            written += chunkWritten;
+            chunkOk = true;
         }
-
-        delay(1);
-    }*/
-
+ 
+        if (!chunkOk)
+        {
+            SerialMon.println("Demasiados reintentos en un bloque, abortando OTA");
+            Update.abort();
+            http.stop();
+            return false;
+        }
+ 
+        // Bloque terminado: cerramos ESTA conexión antes de tocar el MQTT.
+        // Nunca deben estar las dos (ota y mqtt) abiertas al mismo tiempo.
+        http.stop();
+        delay(100);
+ 
+        int percent = (written * 100) / contentLength;
+        float speedKB = (written / 1024.0) / ((millis() - otaStart) / 1000.0);
+ 
+        // Log de CADA bloque, tenga o no el mismo % que el anterior —
+        // así se ve bloque por bloque que se van completando bien.
+        SerialMon.printf("Bloque OK | total %d/%d (%d%%) | %.2f KB/s\n",
+                          (int)written, (int)contentLength, percent, speedKB);
+ 
+        // Progreso por MQTT: solo en este hueco, con la conexión OTA ya
+        // cerrada. Nos conectamos, publicamos, y cerramos de nuevo antes
+        // de abrir el próximo bloque.
+        char mqttMsg[64];
+        snprintf(mqttMsg, sizeof(mqttMsg), "OTA %d%% (%d/%d bytes, %.2f KB/s)", percent, (int)written, (int)contentLength, speedKB);
+        if (mqttConnect())
+        {
+            mqtt.publish("mareografo/debug", mqttMsg);
+            mqtt.disconnect();
+        }
+        client.stop();
+        delay(100);
+ 
+        lastPercent = percent;
+    }
+ 
     http.stop();
-
+ 
     if (!Update.end())
     {
         SerialMon.print("Update Error: ");
         SerialMon.println(Update.errorString());
         return false;
     }
-
+ 
     if (!Update.isFinished())
     {
         SerialMon.println("Firmware incompleto");
         return false;
     }
-
+ 
     SerialMon.println("OTA finalizada correctamente");
     delay(1000);
-    free(buffer);
+ 
     ESP.restart();
-
+ 
     return true;
 }
+ 
 
 void powerOnModem()
 {
@@ -447,25 +523,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
   }
 }
 
-boolean mqttConnect() {
-  SerialMon.print("Connecting to ");
-  SerialMon.print(broker);
-  boolean status = mqtt.connect(broker, "aquaman1", "P0s31d0n1");
 
-  if (status == false) {
-    SerialMon.println(" fail");
-    SerialMon.print("MQTT state: ");
-    SerialMon.println(mqtt.state());
-    SerialMon.println("Probando TCP...");
-    
-  return false;
-  }
-
-  SerialMon.println(" success");
-  mqtt.publish(topicInit, "Aquaman1 started");
-  mqtt.subscribe(topicAquaman1);
-  return mqtt.connected();
-}
 
 double getPressure() //Retorna la presion en mb
 {
@@ -636,7 +694,7 @@ void MQTTVerify(){
     if (modem.isNetworkConnected()) {
       SerialMon.println("Network re-connected");
     }
-
+    }
     // and make sure GPRS/EPS is still connected
     if (!modem.isGprsConnected()) {
       SerialMon.println("GPRS disconnected!");
@@ -650,7 +708,7 @@ void MQTTVerify(){
       if (modem.isGprsConnected()) { SerialMon.println("GPRS reconnected"); }
     }
 
-  }
+  
 if (!mqtt.connected())
 {
     SerialMon.println("====== MQTT disconnected ========");
