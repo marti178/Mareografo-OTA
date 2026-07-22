@@ -317,12 +317,8 @@ bool downloadFirmware()
                     int percent = (written * 100) / contentLength;
                     float speedKB = (written / 1024.0) / ((millis() - otaStart) / 1000.0);
             
-                    SerialMon.printf("Bloque OK | total %d/%d (%d%%) | %.2f KB/s\n",
-                                    (int)written, (int)contentLength, percent, speedKB);
-            
-                    char mqttMsg[64];
-                    snprintf(mqttMsg, sizeof(mqttMsg), "OTA %d%% (%d/%d bytes, %.2f KB/s)", percent, (int)written, (int)contentLength, speedKB);
-            
+                    SerialMon.printf("OTA %d/%d (%d%%) | %.2f KB/s\n",(int)written, (int)contentLength, percent, speedKB);
+
                     // Dejamos el MQTT CONECTADO entre bloques (no lo desconectamos más).
                     // Solo lo reconectamos si de verdad se cayó (p.ej. el broker lo cerró
                     // por keepalive). Esto ahorra el handshake completo en cada bloque.
@@ -332,7 +328,7 @@ bool downloadFirmware()
                     }
                     if (mqtt.connected())
                     {
-                        mqtt.publish("mareografo/debug", mqttMsg);
+                        debugLog("OTA %d/%d (%d%%) %.2f KB/s", (int)written, (int)contentLength, percent, speedKB);
                         mqtt.loop(); // procesa el PING/ACK de este publish, todavía en el hueco seguro
                     }
     
