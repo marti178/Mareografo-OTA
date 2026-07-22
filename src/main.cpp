@@ -198,170 +198,170 @@ bool downloadFirmware()
     // red te hace perder todo), pedimos el archivo en pedacitos chicos,
     // cada uno con su propia conexión y su propio timeout corto. Si un
     // bloque falla, se reintenta SOLO ese bloque, no el archivo entero.
-    const size_t CHUNK_SIZE            = 16384; // 16KB por pedido
-    const uint32_t CHUNK_STALL_TIMEOUT = 15000;  // 15s sin datos = reintentar el bloque
-    const int MAX_RETRIES_PER_CHUNK    = 6;
+    const size_t CHUNK_SIZE            = 50000; // cuanto pedimos por vez (ajustable)
+    const uint32_t STALL_TIMEOUT       = 15000;  // 15s sin datos = damos el intento por trabado
+    const int MAX_FALLOS_SEGUIDOS      = 8;       // reintentos SIN progreso antes de rendirnos
  
     uint8_t buffer[1024];
-    size_t written    = 0;
-    int lastPercent   = -1;
-    uint32_t otaStart = millis();
+    size_t written        = 0;   // SIEMPRE = bytes realmente grabados en flash hasta ahora (fuente de verdad)
+    int lastPercent       = -1;
+    uint32_t otaStart     = millis();
+    int fallosSeguidos    = 0;
  
+    // Un solo bucle: en cada vuelta pedimos "lo que falta, hasta CHUNK_SIZE
+    // bytes" arrancando SIEMPRE desde 'written'. Como 'written' solo avanza
+    // cuando el byte ya está físicamente grabado en la flash, un reintento
+    // nunca puede volver a pedir (ni duplicar) algo que ya se escribió.
     while (written < contentLength)
     {
-        size_t thisChunkLen = min(CHUNK_SIZE, contentLength - written);
-        size_t rangeEnd     = written + thisChunkLen - 1;
+        size_t wantLen  = min(CHUNK_SIZE, contentLength - written);
+        size_t rangeEnd = written + wantLen - 1;
  
-        bool chunkOk = false;
-        int retries  = 0;
+        yield();
+        http.stop();
+        delay(200);
  
-        while (!chunkOk && retries < MAX_RETRIES_PER_CHUNK)
+        String rangeHeader = "bytes=" + String(written) + "-" + String(rangeEnd);
+ 
+        http.beginRequest();
+        http.get(LINK_BIN);
+        http.sendHeader("Range", rangeHeader);
+        http.endRequest();
+ 
+        int status = http.responseStatusCode();
+ 
+        // Si el servidor no respeta el Range (devuelve 200 en vez de 206
+        // para un pedido que no arranca en el byte 0), no se puede seguir
+        // por partes con este hosting: mejor frenar claro que corromper.
+        if (written > 0 && status == 200)
         {
-            yield();
-            http.stop();
-            delay(200);
- 
-            String rangeHeader = "bytes=" + String(written) + "-" + String(rangeEnd);
- 
-            http.beginRequest();
-            http.get(LINK_BIN);
-            http.sendHeader("Range", rangeHeader);
-            http.endRequest();
- 
-            int chunkStatus = http.responseStatusCode();
- 
-            // Si el servidor no respeta el Range (devuelve 200 en vez de
-            // 206 para un pedido que no arranca en el byte 0), no se puede
-            // hacer descarga por partes con este hosting: mejor abortar
-            // claramente en vez de escribir bytes equivocados en la flash.
-            if (written > 0 && chunkStatus == 200)
-            {
-                SerialMon.println("El servidor no soporta Range (HTTP 200 en vez de 206). No se puede reanudar por bloques con este hosting.");
-                Update.abort();
-                http.stop();
-                return false;
-            }
- 
-            if (chunkStatus != 206 && chunkStatus != 200)
-            {
-                SerialMon.printf("Bloque fallo (HTTP %d), reintento %d/%d\n", chunkStatus, retries + 1, MAX_RETRIES_PER_CHUNK);
-                retries++;
-                delay(3000);
-                continue;
-            }
- 
-            // CLAVE: hay que descartar los headers de la respuesta antes
-            // de leer el body. Sin esto, available()/read() devuelven los
-            // headers HTTP crudos (Connection, Content-Length, Server...)
-            // como si fueran el contenido del archivo.
-            http.skipResponseHeaders();
- 
-            size_t chunkWritten     = 0;
-            uint32_t chunkLastData  = millis();
-            bool chunkTimedOut      = false;
- 
-            while (chunkWritten < thisChunkLen)
-            {
-                int available = http.available();
- 
-                if (available > 0)
-                {
-                    size_t want = min((size_t)sizeof(buffer), thisChunkLen - chunkWritten);
-                    int toRead  = min((size_t)available, want);
-                    int len     = http.read(buffer, toRead);
- 
-                    // DIAGNÓSTICO: mostramos en hex los primeros bytes
-                    // que llegan del primerísimo bloque, para ver si es
-                    // el header real de un firmware ESP32 (debería
-                    // arrancar con E9) o si se coló otra cosa (texto de
-                    // headers HTTP, HTML de error, etc).
-                    if (written == 0 && chunkWritten == 0 && len > 0)
-                    {
-                        SerialMon.print("Primeros bytes recibidos (hex): ");
-                        for (int i = 0; i < min(len, 16); i++)
-                        {
-                            SerialMon.printf("%02X ", buffer[i]);
-                        }
-                        SerialMon.println();
-                        SerialMon.print("Como texto: ");
-                        for (int i = 0; i < min(len, 64); i++)
-                        {
-                            char c = (char)buffer[i];
-                            SerialMon.print((c >= 32 && c <= 126) ? c : '.');
-                        }
-                        SerialMon.println();
-                    }
- 
-                    if (len > 0)
-                    {
-                        if (Update.write(buffer, len) != (size_t)len)
-                        {
-                            SerialMon.print("ERROR escribiendo flash: ");
-                            SerialMon.println(Update.errorString());
-                            Update.abort();
-                            http.stop();
-                            return false;
-                        }
-                        chunkWritten   += len;
-                        chunkLastData  = millis();
-                    }
-                }
-                else
-                {
-                    if (millis() - chunkLastData > CHUNK_STALL_TIMEOUT)
-                    {
-                        chunkTimedOut = true;
-                        break;
-                    }
-                    delay(50);
-                }
-            }
- 
-            if (chunkTimedOut)
-            {
-                SerialMon.printf("Timeout en bloque (byte %d), reintento %d/%d\n", (int)written, retries + 1, MAX_RETRIES_PER_CHUNK);
-                retries++;
-                delay(3000);
-                continue; // reintenta el MISMO bloque, 'written' no avanzó
-            }
- 
-            written += chunkWritten;
-            chunkOk = true;
-        }
- 
-        if (!chunkOk)
-        {
-            SerialMon.println("Demasiados reintentos en un bloque, abortando OTA");
+            SerialMon.println("El servidor no soporta Range (HTTP 200 en vez de 206). No se puede reanudar por bloques con este hosting.");
             Update.abort();
             http.stop();
             return false;
         }
  
-        // Bloque terminado: cerramos ESTA conexión antes de tocar el MQTT.
-        // Nunca deben estar las dos (ota y mqtt) abiertas al mismo tiempo.
+        if (status != 206 && status != 200)
+        {
+            fallosSeguidos++;
+            SerialMon.printf("Pedido fallo (HTTP %d), reintento %d/%d\n", status, fallosSeguidos, MAX_FALLOS_SEGUIDOS);
+            if (fallosSeguidos > MAX_FALLOS_SEGUIDOS)
+            {
+                SerialMon.println("Demasiados fallos seguidos, abortando OTA");
+                Update.abort();
+                http.stop();
+                return false;
+            }
+            delay(3000);
+            continue; // reintenta pidiendo desde el MISMO 'written' (no avanzó)
+        }
+ 
+        // CLAVE: hay que descartar los headers de la respuesta antes de
+        // leer el body. Sin esto, available()/read() devuelven los headers
+        // HTTP crudos (Connection, Content-Length, Server...) en vez del
+        // contenido real del archivo.
+        http.skipResponseHeaders();
+ 
+        size_t recibidoEstePedido = 0;
+        uint32_t lastData = millis();
+        bool huboStall    = false;
+ 
+        while (recibidoEstePedido < wantLen)
+        {
+            int available = http.available();
+ 
+            if (available > 0)
+            {
+                size_t want = min((size_t)sizeof(buffer), wantLen - recibidoEstePedido);
+                int toRead  = min((size_t)available, want);
+                int len     = http.read(buffer, toRead);
+ 
+                // DIAGNÓSTICO: primeros bytes del archivo, para confirmar
+                // que arrancamos con el header real de un firmware ESP32
+                // (0xE9) y no con basura de headers HTTP.
+                if (written == 0 && recibidoEstePedido == 0 && len > 0)
+                {
+                    SerialMon.print("Primeros bytes recibidos (hex): ");
+                    for (int i = 0; i < min(len, 16); i++)
+                    {
+                        SerialMon.printf("%02X ", buffer[i]);
+                    }
+                    SerialMon.println();
+                }
+ 
+                if (len > 0)
+                {
+                    if (Update.write(buffer, len) != (size_t)len)
+                    {
+                        // Esto es un error real de flash, no de red — no
+                        // tiene sentido reintentar, abortamos directamente.
+                        SerialMon.print("ERROR escribiendo flash: ");
+                        SerialMon.println(Update.errorString());
+                        Update.abort();
+                        http.stop();
+                        return false;
+                    }
+ 
+                    // Apenas se graba, avanzamos 'written' YA. Esto es lo
+                    // que garantiza que un stall a mitad de pedido nunca
+                    // duplique datos: lo ya grabado no se vuelve a pedir.
+                    written             += len;
+                    recibidoEstePedido  += len;
+                    lastData             = millis();
+                    fallosSeguidos        = 0; // si progresamos, reseteamos el contador de fallos
+                }
+            }
+            else
+            {
+                if (millis() - lastData > STALL_TIMEOUT)
+                {
+                    huboStall = true;
+                    break;
+                }
+                delay(50);
+            }
+        }
+ 
         http.stop();
         delay(100);
  
+        if (huboStall)
+        {
+            fallosSeguidos++;
+            SerialMon.printf("Stall en byte %d, reintento %d/%d\n", (int)written, fallosSeguidos, MAX_FALLOS_SEGUIDOS);
+            if (fallosSeguidos > MAX_FALLOS_SEGUIDOS)
+            {
+                SerialMon.println("Demasiados fallos seguidos, abortando OTA");
+                Update.abort();
+                return false;
+            }
+            delay(3000);
+            continue; // pide desde el 'written' YA actualizado (lo recibido antes del stall no se pierde ni se duplica)
+        }
+ 
+        // Pedido completo: este es el hueco seguro para loguear y avisar
+        // por MQTT (la conexión OTA ya está cerrada acá).
         int percent = (written * 100) / contentLength;
         float speedKB = (written / 1024.0) / ((millis() - otaStart) / 1000.0);
  
-        // Log de CADA bloque, tenga o no el mismo % que el anterior —
-        // así se ve bloque por bloque que se van completando bien.
         SerialMon.printf("Bloque OK | total %d/%d (%d%%) | %.2f KB/s\n",
                           (int)written, (int)contentLength, percent, speedKB);
  
-        // Progreso por MQTT: solo en este hueco, con la conexión OTA ya
-        // cerrada. Nos conectamos, publicamos, y cerramos de nuevo antes
-        // de abrir el próximo bloque.
         char mqttMsg[64];
         snprintf(mqttMsg, sizeof(mqttMsg), "OTA %d%% (%d/%d bytes, %.2f KB/s)", percent, (int)written, (int)contentLength, speedKB);
-        if (mqttConnect())
+ 
+        // Dejamos el MQTT CONECTADO entre bloques (no lo desconectamos más).
+        // Solo lo reconectamos si de verdad se cayó (p.ej. el broker lo cerró
+        // por keepalive). Esto ahorra el handshake completo en cada bloque.
+        if (!mqtt.connected())
+        {
+            mqttConnect();
+        }
+        if (mqtt.connected())
         {
             mqtt.publish("mareografo/debug", mqttMsg);
-            mqtt.disconnect();
+            mqtt.loop(); // procesa el PING/ACK de este publish, todavía en el hueco seguro
         }
-        client.stop();
-        delay(100);
  
         lastPercent = percent;
     }
@@ -388,7 +388,6 @@ bool downloadFirmware()
  
     return true;
 }
- 
 
 void powerOnModem()
 {
