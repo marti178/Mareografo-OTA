@@ -634,11 +634,11 @@ void batteryRead(char *bateria){
 
     // When connecting USB, the battery detection will return 0,
     // because the adc detection circuit is disconnected when connecting USB
-    Serial.println(bateria);
     if (strcmp(bateria, "Voltage :0.00V\n") == 0) {
         Serial.println("USB is connected, please disconnect USB.");
     }
 }
+
 void SensadoYenvio()
 {
     int csq;
@@ -647,7 +647,7 @@ void SensadoYenvio()
     char presion[16];
     char signal[6];
     char temperatura[16];
-    char bateria[10];
+    char bateria[100];
     int bat;
     int Time=0;
     SerialMon.println("Lectura de datos");
@@ -822,7 +822,6 @@ void checkForUpdate()
     otaClient.stop();  // este seguro existe
     delay(10000); // sino no se cierran sockets y se queda colgado el modem
 }
-
 
 void setup() {
   pinMode(12,OUTPUT);
