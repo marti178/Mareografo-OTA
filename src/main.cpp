@@ -32,7 +32,9 @@ const char* topicTemperatura = "Aquaman1/Temperatura";
 const char* topicPresion = "Aquaman1/Presion(hPa)";
 const char* topicSignal = "Aquaman1/Signal";
 const char* topicBateria = "Aquaman1/Bateria(mA)";
+const char* topicFirmware = "Aquaman1/Firmware";
 const char* topicAquaman1 = "Aquaman1/Aquaman1";
+
 
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
@@ -201,7 +203,7 @@ bool downloadFirmware()
     const uint32_t STALL_TIMEOUT       = 3000;  // 10s sin datos = damos el intento por trabado
     const int MAX_FALLOS_SEGUIDOS      = 8;       // reintentos SIN progreso antes de rendirnos
  
-    uint8_t buffer[3000];
+    uint8_t buffer[2000];
     size_t written        = 0;   // SIEMPRE = bytes realmente grabados en flash hasta ahora (fuente de verdad)
     int lastPercent       = -1;
     uint32_t otaStart     = millis();
@@ -680,6 +682,7 @@ void SensadoYenvio()
     mqtt.publish(topicTemperatura,temperatura);
     mqtt.publish(topicSignal,signal);
     mqtt.publish(topicBateria,bateria);
+    mqtt.publish(topicFirmware,FIRMWARE_VERSION);
 
 }
 
