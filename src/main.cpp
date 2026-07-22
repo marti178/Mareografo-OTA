@@ -32,7 +32,7 @@ const char* topicInit      = "Aquaman1/init";
 const char* topicTemperatura = "Aquaman1/Temperatura";
 const char* topicPresion = "Aquaman1/Presion(hPa)";
 const char* topicSignal = "Aquaman1/Signal";
-const char* topicBateria = "Aquaman1/Bateria(mA)";
+const char* topicBateria = "Aquaman1/Bateria(V)";
 const char* topicFirmware = "Aquaman1/Firmware";
 const char* topicAquaman1 = "Aquaman1/Aquaman1";
 
@@ -318,7 +318,7 @@ bool downloadFirmware()
                     int percent = (written * 100) / contentLength;
                     float speedKB = (written / 1024.0) / ((millis() - otaStart) / 1000.0);
             
-                    SerialMon.printf("OTA %d/%d (%d%%) | %.2f KB/s\n",(int)written, (int)contentLength, percent, speedKB);
+                    SerialMon.printf("OTA (%d%%)  %d/%d  | %.2f KB/s\n",percent,(int)written, (int)contentLength,speedKB);
 
                     // Dejamos el MQTT CONECTADO entre bloques (no lo desconectamos más).
                     // Solo lo reconectamos si de verdad se cayó (p.ej. el broker lo cerró
@@ -511,16 +511,28 @@ void InitModem(void){
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
-  SerialMon.print("Message arrived [");
-  SerialMon.print(topic);
-  SerialMon.print("]: ");
-  SerialMon.write(payload, len);
-  SerialMon.println();
+    Serial.println("¡¡¡CALLBACK EJECUTADO!!!");
 
-  // Only proceed if incoming message's topic matches
-  if (String(topic) == topicAquaman1) {
-    
-  }
+    Serial.print("Topic: ");
+    Serial.println(topic);
+
+    String comando = "";
+
+    for (unsigned int i = 0; i < len; i++) {
+        comando += (char)payload[i];
+    }
+
+    Serial.print("Comando recibido: ");
+    Serial.println(comando);
+
+    if (comando == "OTA") {
+        Serial.println("Iniciando OTA...");
+    }
+
+    if (comando == "REBOOT") {
+        Serial.println("Reiniciando...");
+        ESP.restart();
+    }
 }
 
 double getPressure() //Retorna la presion en mb
@@ -630,7 +642,7 @@ void SensorRead(char *dist){
 void batteryRead(char *bateria){
     uint16_t v = analogRead(ADC_PIN);
     float battery_voltage = ((float)v / 4095.0) * 2.0 * 3.3 * (1100/ 1000.0);
-    strcpy(bateria, ("Voltage :" + String(battery_voltage) + "V\n").c_str());
+    strcpy(bateria, (String(battery_voltage) + "V\n").c_str());
 
     // When connecting USB, the battery detection will return 0,
     // because the adc detection circuit is disconnected when connecting USB
@@ -825,7 +837,7 @@ void checkForUpdate()
 
 void setup() {
   pinMode(12,OUTPUT);
-  //pinMode(35, INPUT);
+  pinMode(35, INPUT);
   InitUart();
   const esp_partition_t* running = esp_ota_get_running_partition();
   Serial.printf("Running partition: %s\n", running->label);
@@ -850,6 +862,8 @@ void loop() {
     digitalWrite(12,LOW);
     mqtt.publish("mareografo/debug", "voy a checkear si hay actualizacion de firmware");
     checkForUpdate();
+    
+
 
   mqtt.loop();
 }
