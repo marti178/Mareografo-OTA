@@ -9,6 +9,8 @@
 #define LINK_BIN "https://marti178.github.io/Mareografo-OTA/firmware.bin"
 #define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
 #define FIRMWARE_VERSION "1.0.4"
+#define UPDATE_CHECK_INTERVAL (4UL * 60UL * 1000UL) // cada cuanto chequear actualizaciones (ms)
+#define SLEEP_MINUTES 10 // <-- ajustá acá cada cuánto se despierta el dispositivo
 // Select your modem:
 #define TINY_GSM_MODEM_SIM7070 true
 // Set serial 
@@ -107,6 +109,18 @@ boolean mqttConnect() {
   mqtt.publish(topicInit, "Aquaman1 started");
   mqtt.subscribe(topicAquaman1);
   return mqtt.connected();
+}
+
+void powerOffModem()
+{
+  // AT+CPOWD=1 es el apagado "prolijo" por software del SIM7070/7080
+  // (a diferencia de simplemente cortarle la alimentación). Después de
+  // esto, para volver a prenderlo hace falta el pulso de PWRKEY de
+  // nuevo — que es justo lo que powerOnModem() ya hace de forma segura.
+  SerialMon.println("Apagando modem antes de dormir...");
+  modem.sendAT("+CPOWD=1");
+  modem.waitResponse(5000);
+  delay(2000); // darle tiempo real a que se apague antes de que el ESP32 tambien duerma
 }
 
 void debugLog(const char* format, ...)
@@ -527,6 +541,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
 
     if (comando == "OTA") {
         Serial.println("Iniciando OTA...");
+        downloadFirmware();
     }
 
     if (comando == "REBOOT") {
@@ -646,9 +661,9 @@ void batteryRead(char *bateria){
 
     // When connecting USB, the battery detection will return 0,
     // because the adc detection circuit is disconnected when connecting USB
-    if (strcmp(bateria, "Voltage :0.00V\n") == 0) {
-        Serial.println("USB is connected, please disconnect USB.");
-    }
+    //if (strcmp(bateria, "Voltage :0.00V\n") == 0) {
+    //    Serial.println("USB is connected, please disconnect USB.");
+    //  }
 }
 
 void SensadoYenvio()
@@ -832,7 +847,7 @@ void checkForUpdate()
     SerialMon.print("Cerrando conexión HTTP...");
     http.stop();       // si existe en tu versión
     otaClient.stop();  // este seguro existe
-    delay(10000); // sino no se cierran sockets y se queda colgado el modem
+    delay(100); // sino no se cierran sockets y se queda colgado el modem
 }
 
 void setup() {
@@ -853,6 +868,7 @@ void setup() {
 }
 
 void loop() {
+    mqtt.loop();
     SerialMon.println("empezando LOOP");
     digitalWrite(12,HIGH);
     MQTTVerify();
@@ -860,10 +876,33 @@ void loop() {
     SensadoYenvio();
     mqtt.publish("mareografo/debug", "envié datos");
     digitalWrite(12,LOW);
-    mqtt.publish("mareografo/debug", "voy a checkear si hay actualizacion de firmware");
-    checkForUpdate();
     
+     // Solo chequeamos actualización cada 4 minutos, no en cada vuelta del loop.
+    static uint32_t lastUpdateCheck = 0;
+    if (millis() - lastUpdateCheck >= UPDATE_CHECK_INTERVAL)
+    {
+        lastUpdateCheck = millis();
+        mqtt.publish("mareografo/debug", "voy a checkear si hay actualizacion de firmware");
+        checkForUpdate();
+    }
+
+    // --- Deep sleep ---
+    // El ESP32 se apaga casi por completo y se despierta solo pasados
+    // SLEEP_MINUTES minutos. Al despertar, es como un reinicio: vuelve a
+    // correr setup() entero (reconecta módem, red, MQTT, todo de nuevo).
+    SerialMon.printf("Durmiendo %d minutos...\n", SLEEP_MINUTES);
+    debugLog("mareografo/debug", "Durmiendo %d minutos...\n", SLEEP_MINUTES);
+    SerialMon.flush(); // asegurarse de que el log salga por USB antes de dormir
+    
+    if (mqtt.connected())
+    {
+        mqtt.disconnect();
+    }
+    client.stop();
+    powerOffModem();
 
 
-  mqtt.loop();
+    esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60ULL * 1000000ULL); // la función espera microsegundos
+    esp_deep_sleep_start(); // de acá no vuelve: el chip se reinicia al despertar
+  
 }
