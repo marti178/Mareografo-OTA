@@ -10,7 +10,7 @@
 #define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
 #define FIRMWARE_VERSION "1.0.4"
 #define UPDATE_CHECK_INTERVAL (4UL * 60UL * 1000UL) // cada cuanto chequear actualizaciones (ms)
-#define SLEEP_MINUTES 10 // <-- ajustá acá cada cuánto se despierta el dispositivo
+#define SLEEP_MINUTES 1 // <-- ajustá acá cada cuánto se despierta el dispositivo
 // Select your modem:
 #define TINY_GSM_MODEM_SIM7070 true
 // Set serial 
@@ -73,16 +73,25 @@ TinyGsm        modem(debugger);
 #else
 TinyGsm        modem(SerialAT);
 #endif
-TinyGsmClient client(modem,0);
-PubSubClient  mqtt(client);
+// MQTT
+TinyGsmClient client(modem, 0);
+PubSubClient mqtt(client);
 
-TinyGsmClientSecure otaClient(modem,2);
-    HttpClient http(
-        otaClient,
-        "marti178.github.io",
-        443
-    );
+// OTA HTTPS
+TinyGsmClientSecure otaClient(modem, 2);
+HttpClient http(
+    otaClient,
+    "marti178.github.io",
+    443
+);
 
+// CallMeBot HTTPS
+TinyGsmClientSecure botcliente(modem, 1);
+HttpClient callmebot(
+    botcliente,
+    "api.callmebot.com",
+    443
+);
 #define MODEM_POWER_KEY 4
 #define DATAIN 32
 #define RANGING 33
@@ -109,6 +118,42 @@ boolean mqttConnect() {
   mqtt.publish(topicInit, "Aquaman1 started");
   mqtt.subscribe(topicAquaman1);
   return mqtt.connected();
+}
+
+void enviarCallMeBot() {
+
+    Serial.println("Enviando mensaje por CallMeBot...");
+
+    String ruta =
+        "/whatsapp.php"
+        "?phone=+5491131881142"
+        "&text=Hola%20desde%20el%20ESP32"
+        "&apikey=8134815";
+
+    Serial.print("GET: ");
+    Serial.println(ruta);
+
+    int error = callmebot.get(ruta);
+
+    Serial.print("Resultado GET: ");
+    Serial.println(error);
+
+    // Si error es 0, intentamos leer la respuesta HTTP
+    if (error == 0) {
+
+        int statusCode = callmebot.responseStatusCode();
+
+        Serial.print("HTTP Status Code: ");
+        Serial.println(statusCode);
+
+        String respuesta = callmebot.responseBody();
+
+        Serial.println("Respuesta del servidor:");
+        Serial.println(respuesta);
+    }
+    else {
+        Serial.println("Error al realizar la solicitud HTTP");
+    }
 }
 
 void powerOffModem()
@@ -139,6 +184,8 @@ void debugLog(const char* format, ...)
 
 bool downloadFirmware()
 {   
+    
+    //http.get("https://api.callmebot.com/whatsapp.php?phone=+5491131881142&text=[Iniciando actualizacion de aquaman]&apikey=8134815");
     //mqtt.disconnect();
     //client.stop();      // el cliente MQTT
     yield();
@@ -541,7 +588,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
 
     if (comando == "OTA") {
         Serial.println("Iniciando OTA...");
-        downloadFirmware();
+        enviarCallMeBot();   
+        //downloadFirmware();
     }
 
     if (comando == "REBOOT") {
@@ -549,6 +597,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
         ESP.restart();
     }
 }
+
+
 
 double getPressure() //Retorna la presion en mb
 {
@@ -885,7 +935,9 @@ void loop() {
         mqtt.publish("mareografo/debug", "voy a checkear si hay actualizacion de firmware");
         checkForUpdate();
     }
-
+    delay(3000);
+    mqtt.loop();
+    /*
     // --- Deep sleep ---
     // El ESP32 se apaga casi por completo y se despierta solo pasados
     // SLEEP_MINUTES minutos. Al despertar, es como un reinicio: vuelve a
@@ -904,5 +956,5 @@ void loop() {
 
     esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60ULL * 1000000ULL); // la función espera microsegundos
     esp_deep_sleep_start(); // de acá no vuelve: el chip se reinicia al despertar
-  
+  */
 }
