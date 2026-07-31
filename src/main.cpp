@@ -589,7 +589,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
     if (comando == "OTA") {
         Serial.println("Iniciando OTA...");
         enviarCallMeBot();   
-        //downloadFirmware();
+        downloadFirmware();
     }
 
     if (comando == "REBOOT") {
@@ -705,6 +705,7 @@ void SensorRead(char *dist){
     } 
 
 void batteryRead(char *bateria){
+    
     uint16_t v = analogRead(ADC_PIN);
     float battery_voltage = ((float)v / 4095.0) * 2.0 * 3.3 * (1100/ 1000.0);
     strcpy(bateria, (String(battery_voltage) + "V\n").c_str());
@@ -913,7 +914,7 @@ void setup() {
   // MQTT Broker setup
   mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
-  
+    analogReadResolution(200);
 
 }
 
@@ -937,7 +938,7 @@ void loop() {
     }
     delay(3000);
     mqtt.loop();
-    /*
+    
     // --- Deep sleep ---
     // El ESP32 se apaga casi por completo y se despierta solo pasados
     // SLEEP_MINUTES minutos. Al despertar, es como un reinicio: vuelve a
@@ -956,5 +957,5 @@ void loop() {
 
     esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60ULL * 1000000ULL); // la función espera microsegundos
     esp_deep_sleep_start(); // de acá no vuelve: el chip se reinicia al despertar
-  */
+  
 }
