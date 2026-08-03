@@ -8,7 +8,7 @@
 //Define Version of TinyGSM
 #define LINK_BIN "https://marti178.github.io/Mareografo-OTA/firmware.bin"
 #define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
-#define FIRMWARE_VERSION "1.0.4"
+#define FIRMWARE_VERSION "1.0.5"
 #define UPDATE_CHECK_INTERVAL (4UL * 60UL * 1000UL) // cada cuanto chequear actualizaciones (ms)
 #define SLEEP_MINUTES 1 // <-- ajustá acá cada cuánto se despierta el dispositivo
 // Select your modem:
@@ -944,7 +944,7 @@ void loop() {
     // SLEEP_MINUTES minutos. Al despertar, es como un reinicio: vuelve a
     // correr setup() entero (reconecta módem, red, MQTT, todo de nuevo).
     SerialMon.printf("Durmiendo %d minutos...\n", SLEEP_MINUTES);
-    debugLog("mareografo/debug", "Durmiendo %d minutos...\n", SLEEP_MINUTES);
+    debugLog("mareografo/debug", "Durmiendo 1 minutos...\n");
     SerialMon.flush(); // asegurarse de que el log salga por USB antes de dormir
     
     if (mqtt.connected())
