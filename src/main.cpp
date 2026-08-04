@@ -195,7 +195,7 @@ bool downloadFirmware()
     //client.stop();      // el cliente MQTT
     yield();
     SerialMon.println("Descargando firmware...");
-    mqtt.publish(topicDebug, "Descargando firmware...");
+    debugLog("Descargando firmware...");
     http.get(LINK_BIN);
  
     int statusCode = http.responseStatusCode();
@@ -257,7 +257,7 @@ bool downloadFirmware()
     if (!Update.begin(contentLength))
     {
         SerialMon.println("No hay espacio suficiente para OTA");
-        mqtt.publish(topicDebug, "No hay espacio suficiente para OTA");
+        debugLog("No hay espacio suficiente para OTA");
         http.stop();
         return false;
     }
@@ -421,7 +421,7 @@ bool downloadFirmware()
         {
             fallosSeguidos++;
             SerialMon.printf("Stall en byte %d, reintento %d/%d\n", (int)written, fallosSeguidos, MAX_FALLOS_SEGUIDOS);
-            mqtt.publish(topicDebug, "Stall !!!!!!");
+            debugLog("Stall !!!!!!");
             if (fallosSeguidos > MAX_FALLOS_SEGUIDOS)
             {
                 SerialMon.println("Demasiados fallos seguidos, abortando OTA");
@@ -451,7 +451,7 @@ bool downloadFirmware()
     }
  
     SerialMon.println("OTA finalizada correctamente");
-    mqtt.publish(topicDebug, "OTA finalizada correctamente");
+    debugLog("OTA finalizada correctamente");
     delay(1000);
  
     ESP.restart();
@@ -851,7 +851,7 @@ void checkForUpdate()
     //TinyGsmClientSecure otaClient(modem);
 
     SerialMon.println("Consultando actualización...");
-    mqtt.publish(topicDebug, "Consultando actualización...");
+    debugLog("Consultando actualización...");
     http.get(LINK_VERSION);
 
 
@@ -890,14 +890,14 @@ void checkForUpdate()
         if(isNewerVersion(versionNueva, FIRMWARE_VERSION))
         {
             SerialMon.println("Hay una actualización!");
-            mqtt.publish(topicDebug, "Hay una actualización!");
+            debugLog("Hay una actualización!");
            downloadFirmware();
 
         }
         else
         {
             SerialMon.println("Firmware actualizado.");
-            mqtt.publish(topicDebug, "Firmware actualizado.");
+            debugLog("Firmware actualizado.");
         }
     }
     else
@@ -935,9 +935,9 @@ void loop() {
     SerialMon.println("empezando LOOP");
     digitalWrite(12,HIGH);
     MQTTVerify();
-    mqtt.publish(topicDebug, "voy a sensar y enviar datos");
+    debugLog("voy a sensar y enviar datos");
     SensadoYenvio();
-    mqtt.publish(topicDebug, "envié datos");
+    debugLog("envié datos");
     digitalWrite(12,LOW);
     
      
@@ -946,7 +946,7 @@ void loop() {
     if (millis() - timerupdate >= UPDATE_CHECK_INTERVAL)
     {
     timerupdate = millis();    
-    mqtt.publish(topicDebug, "voy a checkear si hay actualizacion de firmware");
+    debugLog("voy a checkear si hay actualizacion de firmware");
     checkForUpdate();
     delay(100);
     mqtt.loop();
@@ -961,7 +961,7 @@ void loop() {
     {
     TimmerSleep = millis();
     SerialMon.printf("Durmiendo %d minutos...\n", SLEEP_MINUTES);
-    debugLog(topicDebug, "Durmiendo 5 minutos...");
+    debugLog("Durmiendo 5 minutos...");
     
     mqtt.disconnect();
     client.stop();
