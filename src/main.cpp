@@ -29,7 +29,7 @@ const char gprsUser[] = "clarogrps";
 const char gprsPass[] = "clarogprs999";
 
 // MQTT details
-const char* broker = "mqtt.cronon.com.ar";
+const char* broker = "amigosdelagua.com";
 const char* topicDistancia      = "Aquaman1/Distancia(m)";
 const char* topicInit      = "Aquaman1/init";
 const char* topicTemperatura = "Aquaman1/Temperatura";
@@ -39,6 +39,7 @@ const char* topicBateria = "Aquaman1/Bateria(V)";
 const char* topicFirmware = "Aquaman1/Firmware";
 const char* topicCommand = "Aquaman1/Command";
 const char* topicDebug = "Aquaman1/Debug";
+
 
 
 #include <TinyGsmClient.h>
@@ -75,7 +76,7 @@ TinyGsm        modem(debugger);
 #else
 TinyGsm        modem(SerialAT);
 #endif
-// MQTT
+// MQTT 1
 TinyGsmClient client(modem, 0);
 PubSubClient mqtt(client);
 
@@ -106,7 +107,7 @@ double pres;
 boolean mqttConnect() {
   SerialMon.print("Connecting to ");
   SerialMon.print(broker);
-  boolean status = mqtt.connect(broker, "aquaman1", "P0s31d0n1");
+  boolean status = mqtt.connect(broker, "mareografo_user", "vamovamolpm26");
 
   if (status == false) {
     SerialMon.println(" fail");
@@ -123,6 +124,23 @@ boolean mqttConnect() {
   SerialMon.print(topicCommand);
   SerialMon.println(subOk ? ": OK" : ": FALLO");
   return mqtt.connected();
+}
+
+
+void publicarDatos(double temperatura, double presion, double nivel, double bateria) {
+
+    JsonDocument doc;
+
+    doc["nivel_marea"] = nivel;
+    doc["temp_exterior"] = NULL;
+    doc["temp_equipo"] = temperatura;
+    doc["bateria_v"] = bateria;
+    doc["presion_hpa"] = presion;
+
+    char buffer[256];
+    serializeJson(doc, buffer);
+
+    mqtt.publish("amigosdelagua/mareografo/telemetria", buffer);
 }
 
 void enviarCallMeBot() {
@@ -775,6 +793,8 @@ void SensadoYenvio()
     mqtt.publish(topicBateria,bateria);
     mqtt.publish(topicFirmware,FIRMWARE_VERSION);
 
+    publicarDatos(temp, pres, atof(dist), atof(bateria));
+
 }
 
 void MQTTVerify(){
@@ -819,11 +839,11 @@ if (!mqtt.connected())
         }
     }
     delay(100);
-    return;
 
 }
-
 }
+
+
 
 bool isNewerVersion(String nueva, String actual)
 {
