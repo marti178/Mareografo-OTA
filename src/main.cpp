@@ -9,8 +9,9 @@
 #define LINK_BIN "https://marti178.github.io/Mareografo-OTA/firmware.bin"
 #define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
 #define FIRMWARE_VERSION "1.0.5"
-#define UPDATE_CHECK_INTERVAL (4UL * 60UL * 1000UL) // cada cuanto chequear actualizaciones (ms)
-#define SLEEP_MINUTES 1 // <-- ajustá acá cada cuánto se despierta el dispositivo
+#define UPDATE_CHECK_INTERVAL (1UL * 60UL * 1000UL) // cada cuanto chequear actualizaciones (ms)
+#define AWAKE_INTERVAL (2UL * 60UL * 1000UL) // cada cuanto se va a dormir el dispositivo (ms)
+#define SLEEP_MINUTES 5 // <-- ajustá acá cada cuánto se despierta el dispositivo
 // Select your modem:
 #define TINY_GSM_MODEM_SIM7070 true
 // Set serial 
@@ -36,7 +37,8 @@ const char* topicPresion = "Aquaman1/Presion(hPa)";
 const char* topicSignal = "Aquaman1/Signal";
 const char* topicBateria = "Aquaman1/Bateria(V)";
 const char* topicFirmware = "Aquaman1/Firmware";
-const char* topicAquaman1 = "Aquaman1/Aquaman1";
+const char* topicCommand = "Aquaman1/Command";
+const char* topicDebug = "Aquaman1/Debug";
 
 
 #include <TinyGsmClient.h>
@@ -116,7 +118,10 @@ boolean mqttConnect() {
 
   SerialMon.println(" success");
   mqtt.publish(topicInit, "Aquaman1 started");
-  mqtt.subscribe(topicAquaman1);
+  bool subOk = mqtt.subscribe(topicCommand);
+  SerialMon.print("Suscripcion a ");
+  SerialMon.print(topicCommand);
+  SerialMon.println(subOk ? ": OK" : ": FALLO");
   return mqtt.connected();
 }
 
@@ -179,7 +184,7 @@ void debugLog(const char* format, ...)
 
     
     if (mqtt.connected())
-        mqtt.publish("mareografo/debug", buffer);
+        mqtt.publish(topicDebug, buffer);
 }
 
 bool downloadFirmware()
@@ -190,7 +195,7 @@ bool downloadFirmware()
     //client.stop();      // el cliente MQTT
     yield();
     SerialMon.println("Descargando firmware...");
- 
+    mqtt.publish(topicDebug, "Descargando firmware...");
     http.get(LINK_BIN);
  
     int statusCode = http.responseStatusCode();
@@ -252,6 +257,7 @@ bool downloadFirmware()
     if (!Update.begin(contentLength))
     {
         SerialMon.println("No hay espacio suficiente para OTA");
+        mqtt.publish(topicDebug, "No hay espacio suficiente para OTA");
         http.stop();
         return false;
     }
@@ -415,6 +421,7 @@ bool downloadFirmware()
         {
             fallosSeguidos++;
             SerialMon.printf("Stall en byte %d, reintento %d/%d\n", (int)written, fallosSeguidos, MAX_FALLOS_SEGUIDOS);
+            mqtt.publish(topicDebug, "Stall !!!!!!");
             if (fallosSeguidos > MAX_FALLOS_SEGUIDOS)
             {
                 SerialMon.println("Demasiados fallos seguidos, abortando OTA");
@@ -444,6 +451,7 @@ bool downloadFirmware()
     }
  
     SerialMon.println("OTA finalizada correctamente");
+    mqtt.publish(topicDebug, "OTA finalizada correctamente");
     delay(1000);
  
     ESP.restart();
@@ -591,14 +599,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
         enviarCallMeBot();   
         downloadFirmware();
     }
-
-    if (comando == "REBOOT") {
+    else if (comando == "REBOOT") {
         Serial.println("Reiniciando...");
         ESP.restart();
     }
+    else {
+
+    }
 }
-
-
 
 double getPressure() //Retorna la presion en mb
 {
@@ -843,7 +851,7 @@ void checkForUpdate()
     //TinyGsmClientSecure otaClient(modem);
 
     SerialMon.println("Consultando actualización...");
-
+    mqtt.publish(topicDebug, "Consultando actualización...");
     http.get(LINK_VERSION);
 
 
@@ -882,12 +890,14 @@ void checkForUpdate()
         if(isNewerVersion(versionNueva, FIRMWARE_VERSION))
         {
             SerialMon.println("Hay una actualización!");
+            mqtt.publish(topicDebug, "Hay una actualización!");
            downloadFirmware();
 
         }
         else
         {
             SerialMon.println("Firmware actualizado.");
+            mqtt.publish(topicDebug, "Firmware actualizado.");
         }
     }
     else
@@ -900,6 +910,8 @@ void checkForUpdate()
     otaClient.stop();  // este seguro existe
     delay(100); // sino no se cierran sockets y se queda colgado el modem
 }
+
+
 
 void setup() {
   pinMode(12,OUTPUT);
@@ -923,39 +935,38 @@ void loop() {
     SerialMon.println("empezando LOOP");
     digitalWrite(12,HIGH);
     MQTTVerify();
-    mqtt.publish("mareografo/debug", "voy a sensar y enviar datos");
+    mqtt.publish(topicDebug, "voy a sensar y enviar datos");
     SensadoYenvio();
-    mqtt.publish("mareografo/debug", "envié datos");
+    mqtt.publish(topicDebug, "envié datos");
     digitalWrite(12,LOW);
     
-     // Solo chequeamos actualización cada 4 minutos, no en cada vuelta del loop.
-    static uint32_t lastUpdateCheck = 0;
-    if (millis() - lastUpdateCheck >= UPDATE_CHECK_INTERVAL)
-    {
-        lastUpdateCheck = millis();
-        mqtt.publish("mareografo/debug", "voy a checkear si hay actualizacion de firmware");
-        checkForUpdate();
-    }
-    delay(3000);
-    mqtt.loop();
+     
     
+    static uint32_t timerupdate = 0;
+    if (millis() - timerupdate >= UPDATE_CHECK_INTERVAL)
+    {
+    timerupdate = millis();    
+    mqtt.publish(topicDebug, "voy a checkear si hay actualizacion de firmware");
+    checkForUpdate();
+    delay(100);
+    mqtt.loop();
+    }
     // --- Deep sleep ---
     // El ESP32 se apaga casi por completo y se despierta solo pasados
     // SLEEP_MINUTES minutos. Al despertar, es como un reinicio: vuelve a
     // correr setup() entero (reconecta módem, red, MQTT, todo de nuevo).
-    SerialMon.printf("Durmiendo %d minutos...\n", SLEEP_MINUTES);
-    debugLog("mareografo/debug", "Durmiendo 1 minutos...\n");
-    SerialMon.flush(); // asegurarse de que el log salga por USB antes de dormir
-    
-    if (mqtt.connected())
+    // Solo dormimos cada 4 minutos, no en cada vuelta del loop.
+    static uint32_t TimmerSleep = 0;
+    if (millis() - TimmerSleep >= AWAKE_INTERVAL)
     {
-        mqtt.disconnect();
-    }
+    TimmerSleep = millis();
+    SerialMon.printf("Durmiendo %d minutos...\n", SLEEP_MINUTES);
+    debugLog(topicDebug, "Durmiendo 5 minutos...");
+    
+    mqtt.disconnect();
     client.stop();
     powerOffModem();
-
-
     esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60ULL * 1000000ULL); // la función espera microsegundos
     esp_deep_sleep_start(); // de acá no vuelve: el chip se reinicia al despertar
-  
+    }
 }
