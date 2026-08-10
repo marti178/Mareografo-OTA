@@ -105,6 +105,7 @@ uint32_t lastReconnectAttempt = 0;
 SFE_BMP180 pressure;
 double temp;
 double pres;
+int actflag=0;
 
 boolean mqttConnect() {
   SerialMon.print("Connecting to ");
@@ -747,8 +748,13 @@ void batteryRead(char *bateria){
 }
 
 void solarRead(char *solar) {
-    uint32_t mv = analogReadMilliVolts(36) * 2;
-    float voltage = mv / 1000.0;
+    uint16_t raw = analogRead(36);
+    uint32_t mv = analogReadMilliVolts(36);
+
+    debugLog((String("SOLAR RAW: ") + raw).c_str());
+    debugLog((String("SOLAR ADC: ") + mv + "mV").c_str());
+
+    float voltage = (mv / 1000.0) * 2.0;
 
     snprintf(solar, 16, "%.2fV\n", voltage);
 }
@@ -972,12 +978,10 @@ void loop() {
     debugLog("envié datos");
     digitalWrite(12,LOW);
     
-     
-    
-    static uint32_t timerupdate = 0;
-    if (millis() - timerupdate >= UPDATE_CHECK_INTERVAL)
+
+    if (actflag==0 )
     {
-    timerupdate = millis();    
+        actflag=1;
     debugLog("voy a checkear si hay actualizacion de firmware");
     checkForUpdate();
     delay(100);
