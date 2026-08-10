@@ -39,6 +39,7 @@ const char* topicBateria = "Aquaman1/Bateria(V)";
 const char* topicFirmware = "Aquaman1/Firmware";
 const char* topicCommand = "Aquaman1/Command";
 const char* topicState = "Aquaman1/State";
+const char* topicSolar = "Aquaman1/Solar(V)";
 const char* topicDebug = "Aquaman1/Debug";
 
 
@@ -126,7 +127,6 @@ boolean mqttConnect() {
   SerialMon.println(subOk ? ": OK" : ": FALLO");
   return mqtt.connected();
 }
-
 
 void publicarDatos(double temperatura, double presion, double nivel, double bateria) {
 
@@ -466,6 +466,7 @@ bool downloadFirmware()
     if (!Update.isFinished())
     {
         SerialMon.println("Firmware incompleto");
+        debugLog("Firmware incompleto");
         return false;
     }
  
@@ -744,6 +745,14 @@ void batteryRead(char *bateria){
     //  }
 }
 
+void solarRead(char *solar){
+    
+    uint16_t v = analogRead(34);
+    float solar_voltage = ((float)v / 4095.0) * 2.0 * 3.3 * (1100/ 1000.0);
+    strcpy(solar, (String(solar_voltage) + "V\n").c_str());
+
+}
+
 void SensadoYenvio()
 {
     int csq;
@@ -753,6 +762,7 @@ void SensadoYenvio()
     char signal[6];
     char temperatura[16];
     char bateria[100];
+    char solar[100];
     int bat;
     int Time=0;
     SerialMon.println("Lectura de datos");
@@ -782,6 +792,8 @@ void SensadoYenvio()
     SerialMon.println("=====================");
     //Estado de bateria
     batteryRead(bateria);
+    //Lectura de voltaje del panel solar
+    solarRead(solar);
     //Conversion de datos
     sprintf(presion,"%f",pres);
     sprintf(temperatura,"%f",temp);
@@ -792,8 +804,8 @@ void SensadoYenvio()
     mqtt.publish(topicTemperatura,temperatura);
     mqtt.publish(topicSignal,signal);
     mqtt.publish(topicBateria,bateria);
+    mqtt.publish(topicSolar,solar);
     mqtt.publish(topicFirmware,FIRMWARE_VERSION);
-
     publicarDatos(temp, pres, atof(dist), atof(bateria));
 
 }
