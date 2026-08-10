@@ -38,6 +38,7 @@ const char* topicSignal = "Aquaman1/Signal";
 const char* topicBateria = "Aquaman1/Bateria(V)";
 const char* topicFirmware = "Aquaman1/Firmware";
 const char* topicCommand = "Aquaman1/Command";
+const char* topicState = "Aquaman1/State";
 const char* topicDebug = "Aquaman1/Debug";
 
 
@@ -955,6 +956,7 @@ void loop() {
     SerialMon.println("empezando LOOP");
     digitalWrite(12,HIGH);
     MQTTVerify();
+    mqtt.publish(topicState,"Awake");
     debugLog("voy a sensar y enviar datos");
     SensadoYenvio();
     debugLog("envié datos");
@@ -982,7 +984,7 @@ void loop() {
     TimmerSleep = millis();
     SerialMon.printf("Durmiendo %d minutos...\n", SLEEP_MINUTES);
     debugLog("Durmiendo 5 minutos...");
-    
+    mqtt.publish(topicState,"Sleeping");
     mqtt.disconnect();
     client.stop();
     powerOffModem();
