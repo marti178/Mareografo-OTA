@@ -745,12 +745,11 @@ void batteryRead(char *bateria){
     //  }
 }
 
-void solarRead(char *solar){
-    
-    uint16_t v = analogRead(34);
-    float solar_voltage = ((float)v / 4095.0) * 2.0 * 3.3 * (1100/ 1000.0);
-    strcpy(solar, (String(solar_voltage) + "V\n").c_str());
+void solarRead(char *solar) {
+    uint32_t mv = analogReadMilliVolts(36) * 2;
+    float voltage = mv / 1000.0;
 
+    snprintf(solar, 16, "%.2fV\n", voltage);
 }
 
 void SensadoYenvio()
