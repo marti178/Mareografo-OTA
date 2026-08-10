@@ -748,14 +748,9 @@ void batteryRead(char *bateria){
 }
 
 void solarRead(char *solar) {
-    uint16_t raw = analogRead(36);
-    uint32_t mv = analogReadMilliVolts(36);
-
-    debugLog((String("SOLAR RAW: ") + raw).c_str());
-    debugLog((String("SOLAR ADC: ") + mv + "mV").c_str());
-
-    float voltage = (mv / 1000.0) * 2.0;
-
+    uint32_t mv = analogReadMilliVolts(36) * 2;
+    float voltage = mv / 1000.0;
+    debugLog("Voltaje del panel solar: %.2f V", voltage);
     snprintf(solar, 16, "%.2fV\n", voltage);
 }
 
