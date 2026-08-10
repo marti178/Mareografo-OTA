@@ -460,6 +460,7 @@ bool downloadFirmware()
     {
         SerialMon.print("Update Error: ");
         SerialMon.println(Update.errorString());
+        debugLog("Update Error: %s", Update.errorString());
         return false;
     }
  
@@ -854,8 +855,6 @@ if (!mqtt.connected())
 
 }
 }
-
-
 
 bool isNewerVersion(String nueva, String actual)
 {
