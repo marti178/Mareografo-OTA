@@ -750,7 +750,6 @@ void batteryRead(char *bateria){
 void solarRead(char *solar) {
     uint32_t mv = analogReadMilliVolts(36) * 2;
     float voltage = mv / 1000.0;
-    debugLog("Voltaje del panel solar: %.2f V", voltage);
     snprintf(solar, 16, "%.2fV\n", voltage);
 }
 
