@@ -625,6 +625,26 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
         Serial.println("Reiniciando...");
         ESP.restart();
     }
+    else if (comando == "SLEEP 30") {
+        Serial.println("Durmiendo 30 minutos...");
+        debugLog("Durmiendo 30 minutos...");
+        mqtt.publish(topicState,"Sleeping");
+        mqtt.disconnect();
+        client.stop();
+        powerOffModem();
+        esp_sleep_enable_timer_wakeup((uint64_t)30 * 60ULL * 1000000ULL); // la función espera microsegundos
+        esp_deep_sleep_start(); // de acá no vuelve: el chip se reinicia al despertar
+    }
+    else if (comando == "SLEEP 120") {
+        Serial.println("Durmiendo 120 minutos...");
+        debugLog("Durmiendo 120 minutos...");
+        mqtt.publish(topicState,"Sleeping");
+        mqtt.disconnect();
+        client.stop();
+        powerOffModem();
+        esp_sleep_enable_timer_wakeup((uint64_t)120 * 60ULL * 1000000ULL); // la función espera microsegundos
+        esp_deep_sleep_start(); // de acá no vuelve: el chip se reinicia al despertar
+    }
     else {
 
     }
