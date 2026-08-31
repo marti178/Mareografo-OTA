@@ -8,7 +8,7 @@
 //Define Version of TinyGSM
 #define LINK_BIN "https://marti178.github.io/Mareografo-OTA/firmware.bin"
 #define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
-#define FIRMWARE_VERSION "1.0.5"
+#define FIRMWARE_VERSION "1.0.6"
 #define UPDATE_CHECK_INTERVAL (1UL * 60UL * 1000UL) // cada cuanto chequear actualizaciones (ms)
 #define AWAKE_INTERVAL (2UL * 60UL * 1000UL) // cada cuanto se va a dormir el dispositivo (ms)
 #define SLEEP_MINUTES 5 // <-- ajustá acá cada cuánto se despierta el dispositivo
@@ -537,7 +537,7 @@ void InitModem(void){
   //modem.init();
   delay(6000); 
   SerialMon.println("Configurando modem... ");
-  modem.setPreferredMode(MODE_GPRS); //Mode NB-Iot lo 
+  modem.setPreferredMode(2); //Mode NB-Iot lo 
   delay(3000);
   // Fijar baudrate (sin autobaud) — lo repetimos en cada boot, no dependemos de &W
   /*modem.sendAT("+IPR=921600");
