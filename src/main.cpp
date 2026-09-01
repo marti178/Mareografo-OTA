@@ -537,7 +537,7 @@ void InitModem(void){
   //modem.init();
   delay(6000); 
   SerialMon.println("Configurando modem... ");
-  modem.setPreferredMode(2); //Mode NB-Iot lo 
+  modem.setPreferredMode(1); //Mode NB-Iot lo 
   delay(3000);
   // Fijar baudrate (sin autobaud) — lo repetimos en cada boot, no dependemos de &W
   /*modem.sendAT("+IPR=921600");
