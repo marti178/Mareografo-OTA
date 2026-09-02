@@ -11,7 +11,7 @@
 #define FIRMWARE_VERSION "1.0.6"
 #define UPDATE_CHECK_INTERVAL (1UL * 60UL * 1000UL) // cada cuanto chequear actualizaciones (ms)
 #define AWAKE_INTERVAL (2UL * 60UL * 1000UL) // cada cuanto se va a dormir el dispositivo (ms)
-#define SLEEP_MINUTES 5 // <-- ajustá acá cada cuánto se despierta el dispositivo
+#define SLEEP_MINUTES 15 // <-- ajustá acá cada cuánto se despierta el dispositivo
 // Select your modem:
 #define TINY_GSM_MODEM_SIM7070 true
 // Set serial 
@@ -1011,7 +1011,7 @@ void loop() {
     {
     TimmerSleep = millis();
     SerialMon.printf("Durmiendo %d minutos...\n", SLEEP_MINUTES);
-    debugLog("Durmiendo 5 minutos...");
+    debugLog("Durmiendo 15 minutos...");
     mqtt.publish(topicState,"Sleeping");
     mqtt.disconnect();
     client.stop();
