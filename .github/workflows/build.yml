@@ -32,20 +32,50 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
+      - name: Create secrets.h from repository secrets
+        # include/secrets.h no esta en git. Definir en GitHub (Settings > Secrets and
+        # variables > Actions): GPRS_APN, GPRS_USER, GPRS_PASS, MQTT_BROKER, MQTT_USER,
+        # MQTT_PASS, CALLMEBOT_PHONE, CALLMEBOT_APIKEY. Si falta alguno el build FALLA
+        # (nunca se debe publicar por OTA un firmware con credenciales de ejemplo).
+        env:
+          GPRS_APN: ${{ secrets.GPRS_APN }}
+          GPRS_USER: ${{ secrets.GPRS_USER }}
+          GPRS_PASS: ${{ secrets.GPRS_PASS }}
+          MQTT_BROKER: ${{ secrets.MQTT_BROKER }}
+          MQTT_USER: ${{ secrets.MQTT_USER }}
+          MQTT_PASS: ${{ secrets.MQTT_PASS }}
+          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+        run: |
+          for v in GPRS_APN MQTT_BROKER MQTT_USER MQTT_PASS; do
+            if [ -z "${!v}" ]; then echo "::error::Falta el secret $v"; exit 1; fi
+          done
+          {
+            echo '#pragma once'
+            echo "#define GPRS_APN \"$GPRS_APN\""
+            echo "#define GPRS_USER \"$GPRS_USER\""
+            echo "#define GPRS_PASS \"$GPRS_PASS\""
+            echo "#define MQTT_BROKER \"$MQTT_BROKER\""
+            echo "#define MQTT_USER \"$MQTT_USER\""
+            echo "#define MQTT_PASS \"$MQTT_PASS\""
+            if [ -n "$CALLMEBOT_APIKEY" ]; then
+              echo "#define CALLMEBOT_PHONE \"$CALLMEBOT_PHONE\""
+              echo "#define CALLMEBOT_APIKEY \"$CALLMEBOT_APIKEY\""
+            fi
+          } > include/secrets.h
+
       - name: Build firmware
         run: pio run
 
       - name: Prepare OTA files
         run: |
+          VERSION=$(tr -d '[:space:]' < version.txt)
           mkdir site
           cp .pio/build/esp-wrover-kit/firmware.bin site/firmware.bin
-
-          cat > site/version.json << EOF
-          {
-            "version": "1.0.6",
-            "firmware": "firmware.bin"
-          }
-          EOF
+          SHA=$(sha256sum site/firmware.bin | cut -d' ' -f1)
+          SIZE=$(stat -c%s site/firmware.bin)
+          printf '{\n  "version": "%s",\n  "firmware": "firmware.bin",\n  "sha256": "%s",\n  "size": %s\n}\n' "$VERSION" "$SHA" "$SIZE" > site/version.json
+          cat site/version.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

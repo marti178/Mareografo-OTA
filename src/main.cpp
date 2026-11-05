@@ -4,17 +4,34 @@
 * Date: 9/02/2023
 * Proyect Manager: Fernando Agostino
 * Proyect Leader: Martin Marotta
- **************************************************************/
-//Define Version of TinyGSM
-#define LINK_BIN "https://marti178.github.io/Mareografo-OTA/firmware.bin"
-#define LINK_VERSION "https://marti178.github.io/Mareografo-OTA/version.json"
-#define FIRMWARE_VERSION "1.0.6"
-#define UPDATE_CHECK_INTERVAL (1UL * 60UL * 1000UL) // cada cuanto chequear actualizaciones (ms)
-#define AWAKE_INTERVAL (2UL * 60UL * 1000UL) // cada cuanto se va a dormir el dispositivo (ms)
-#define SLEEP_MINUTES 15 // <-- ajustá acá cada cuánto se despierta el dispositivo
+**************************************************************/
+
+// Credenciales (APN, MQTT, CallMeBot): ver include/secrets.example.h
+// include/secrets.h NO se sube a git (.gitignore).
+#include "secrets.h"
+
+// La version viene de version.txt (la inyecta scripts/version.py).
+// Es la UNICA fuente: el workflow de GitHub tambien la lee de ahi.
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "0.0.0"
+#endif
+
+// --- OTA ---
+#define OTA_HOST "marti178.github.io"
+#define OTA_PATH_BIN "/Mareografo-OTA/firmware.bin"
+#define OTA_PATH_VERSION "/Mareografo-OTA/version.json"
+#define OTA_REQUIRE_SHA256 1 // 1 = no se instala nada sin sha256 valido en version.json
+
+// --- Ciclo de trabajo ---
+#define AWAKE_INTERVAL (2UL * 60UL * 1000UL)  // ventana despierto, medida desde que termina setup() (ms)
+#define PUBLISH_INTERVAL (30UL * 1000UL)      // cada cuanto se sensa/publica mientras esta despierto (ms)
+#define SLEEP_MINUTES 15                      // cada cuanto se despierta el dispositivo
+#define NET_MAX_TRIES 6                       // intentos de registro en red antes de rendirse y dormir
+#define MAX_UNCONFIRMED_BOOTS 3               // arranques sin "confirmar" firmware nuevo antes de volver al anterior
+
 // Select your modem:
 #define TINY_GSM_MODEM_SIM7070 true
-// Set serial 
+// Set serial
 #define SerialMon Serial
 #define SerialMaxB Serial1
 #define SerialAT Serial2
@@ -22,14 +39,16 @@
 #define TINY_GSM_USE_WIFI false
 #define MODE_GPRS 1
 #define ADC_PIN 35
+// OJO: TINY_GSM_RX_BUFFER (1024) se define en platformio.ini (build_flags).
+// Con el valor por defecto (64) la descarga OTA es ~16 veces mas lenta.
 
 // Your GPRS credentials, if any
-const char apn[]      = "igprs.claro.com.ar";
-const char gprsUser[] = "clarogrps";
-const char gprsPass[] = "clarogprs999";
+const char apn[]      = GPRS_APN;
+const char gprsUser[] = GPRS_USER;
+const char gprsPass[] = GPRS_PASS;
 
 // MQTT details
-const char* broker = "amigosdelagua.com";
+const char* broker = MQTT_BROKER;
 const char* topicDistancia      = "Aquaman1/Distancia(m)";
 const char* topicInit      = "Aquaman1/init";
 const char* topicTemperatura = "Aquaman1/Temperatura";
@@ -41,21 +60,21 @@ const char* topicCommand = "Aquaman1/Command";
 const char* topicState = "Aquaman1/State";
 const char* topicSolar = "Aquaman1/Solar(V)";
 const char* topicDebug = "Aquaman1/Debug";
-
-
+const char* topicOta = "Aquaman1/OTA"; // porcentaje (0-100) mientras se actualiza
 
 #include <TinyGsmClient.h>
 #include <PubSubClient.h>
 #include <Wire.h>
 #include <Arduino.h>
-#include<SFE_BMP180.h>
+#include <SFE_BMP180.h>
 
-#include <WiFiClient.h>
 #include <ArduinoJson.h>
 #include <ArduinoHttpClient.h>
 
 #include <Update.h>
+#include <Preferences.h>
 #include <esp_ota_ops.h>
+#include "mbedtls/sha256.h"
 
 // Just in case someone defined the wrong thing..
 #if TINY_GSM_USE_GPRS && not defined TINY_GSM_MODEM_HAS_GPRS
@@ -84,40 +103,38 @@ PubSubClient mqtt(client);
 
 // OTA HTTPS
 TinyGsmClientSecure otaClient(modem, 2);
-HttpClient http(
-    otaClient,
-    "marti178.github.io",
-    443
-);
+HttpClient http(otaClient, OTA_HOST, 443);
 
 // CallMeBot HTTPS
 TinyGsmClientSecure botcliente(modem, 1);
-HttpClient callmebot(
-    botcliente,
-    "api.callmebot.com",
-    443
-);
+HttpClient callmebot(botcliente, "api.callmebot.com", 443);
+
 #define MODEM_POWER_KEY 4
 #define DATAIN 32
 #define RANGING 33
 
 uint32_t lastReconnectAttempt = 0;
+uint32_t awakeStart = 0;
 SFE_BMP180 pressure;
-double temp;
-double pres;
-int actflag=0;
+double temp = NAN;
+double pres = NAN;
+char mqttClientId[24];
+
+// Comando recibido por MQTT. El callback SOLO lo guarda; se ejecuta desde loop()
+// (antes el OTA corria adentro del callback, re-entrando a mqtt.loop()).
+static char pendingCmd[32];
+static volatile bool cmdPending = false;
 
 boolean mqttConnect() {
   SerialMon.print("Connecting to ");
   SerialMon.print(broker);
-  boolean status = mqtt.connect(broker, "mareografo_user", "vamovamolpm26");
+  boolean status = mqtt.connect(mqttClientId, MQTT_USER, MQTT_PASS);
 
   if (status == false) {
     SerialMon.println(" fail");
     SerialMon.print("MQTT state: ");
     SerialMon.println(mqtt.state());
-    
-  return false;
+    return false;
   }
 
   SerialMon.println(" success");
@@ -133,8 +150,9 @@ void publicarDatos(double temperatura, double presion, double nivel, double bate
 
     JsonDocument doc;
 
+    // NaN se serializa como null (valor invalido != valor 0)
     doc["nivel_marea"] = nivel;
-    doc["temp_exterior"] = NULL;
+    doc["temp_exterior"] = nullptr;
     doc["temp_equipo"] = temperatura;
     doc["bateria_v"] = bateria;
     doc["presion_hpa"] = presion;
@@ -146,17 +164,13 @@ void publicarDatos(double temperatura, double presion, double nivel, double bate
 }
 
 void enviarCallMeBot() {
-
+#ifdef CALLMEBOT_APIKEY
     Serial.println("Enviando mensaje por CallMeBot...");
 
-    String ruta =
-        "/whatsapp.php"
-        "?phone=+5491131881142"
-        "&text=Hola%20desde%20el%20ESP32"
-        "&apikey=8134815";
-
-    Serial.print("GET: ");
-    Serial.println(ruta);
+    // %2B = '+' (un '+' crudo en una query se interpreta como espacio)
+    String ruta = String("/whatsapp.php?phone=%2B") + CALLMEBOT_PHONE +
+                  "&text=Aquaman1%3A%20iniciando%20actualizacion%20OTA" +
+                  "&apikey=" + CALLMEBOT_APIKEY;
 
     int error = callmebot.get(ruta);
 
@@ -165,7 +179,6 @@ void enviarCallMeBot() {
 
     // Si error es 0, intentamos leer la respuesta HTTP
     if (error == 0) {
-
         int statusCode = callmebot.responseStatusCode();
 
         Serial.print("HTTP Status Code: ");
@@ -179,12 +192,14 @@ void enviarCallMeBot() {
     else {
         Serial.println("Error al realizar la solicitud HTTP");
     }
+    callmebot.stop(); // liberar el socket (mux 1) en cualquier caso
+#endif
 }
 
 void powerOffModem()
 {
   // AT+CPOWD=1 es el apagado "prolijo" por software del SIM7070/7080
-  // (a diferencia de simplemente cortarle la alimentación). Después de
+  // (a diferencia de simplemente cortarle la alimentacion). Despues de
   // esto, para volver a prenderlo hace falta el pulso de PWRKEY de
   // nuevo — que es justo lo que powerOnModem() ya hace de forma segura.
   SerialMon.println("Apagando modem antes de dormir...");
@@ -202,261 +217,342 @@ void debugLog(const char* format, ...)
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
 
-    
     if (mqtt.connected())
         mqtt.publish(topicDebug, buffer);
 }
 
-bool downloadFirmware()
-{   
-    
-    //http.get("https://api.callmebot.com/whatsapp.php?phone=+5491131881142&text=[Iniciando actualizacion de aquaman]&apikey=8134815");
-    //mqtt.disconnect();
-    //client.stop();      // el cliente MQTT
-    yield();
-    SerialMon.println("Descargando firmware...");
-    debugLog("Descargando firmware...");
-    http.get(LINK_BIN);
- 
-    int statusCode = http.responseStatusCode();
- 
-    if (statusCode != 200)
-    {
-        SerialMon.print("HTTP Error: ");
-        SerialMon.println(statusCode);
-        http.stop();
-        return false;
+// ---------------------------------------------------------------------
+// Rollback por software.
+// El bootloader de Arduino no trae rollback automatico, asi que lo hacemos
+// a mano: tras un OTA se marca "pend"; si el firmware nuevo arranca
+// MAX_UNCONFIRMED_BOOTS veces sin llegar a un camino normal de sleep
+// (crash loop / cuelgue + reset), se vuelve a la particion anterior.
+// ---------------------------------------------------------------------
+void markFirmwarePending()
+{
+    Preferences p;
+    p.begin("ota", false);
+    p.putUChar("pend", 1);
+    p.putUChar("boots", 0);
+    p.end();
+}
+
+void confirmFirmware()
+{
+    Preferences p;
+    p.begin("ota", false);
+    if (p.getUChar("pend", 0)) {
+        p.putUChar("pend", 0);
+        p.putUChar("boots", 0);
+        SerialMon.println("Firmware nuevo confirmado");
     }
- 
-    int contentLength = http.contentLength();
-    http.stop();  // cerramos YA esta conexión: no queremos dejar el body
-                  // del archivo esperando sin leer mientras hacemos abajo
-                  // varias consultas AT lentas (CPSI puede tardar 5s).
-    delay(300);
- 
-    if (contentLength <= 0)
-    {
-        SerialMon.println("Content-Length inválido");
-        return false;
+    p.end();
+}
+
+void checkRollback()
+{
+    Preferences p;
+    p.begin("ota", false);
+    if (p.getUChar("pend", 0)) {
+        uint8_t boots = p.getUChar("boots", 0) + 1;
+        if (boots > MAX_UNCONFIRMED_BOOTS) {
+            p.putUChar("pend", 0);
+            p.putUChar("boots", 0);
+            p.end();
+            const esp_partition_t* other = esp_ota_get_next_update_partition(NULL);
+            if (other && esp_ota_set_boot_partition(other) == ESP_OK) {
+                SerialMon.println("Firmware nuevo no se confirmo: volviendo a la version anterior");
+                delay(200);
+                ESP.restart();
+            }
+            SerialMon.println("Rollback fallo: no hay particion anterior valida");
+            return;
+        }
+        p.putUChar("boots", boots);
     }
- 
-    SerialMon.print("Firmware: ");
-    SerialMon.print(contentLength);
-    SerialMon.println(" bytes");
- 
+    p.end();
+}
+
+void goToSleep(uint32_t minutes)
+{
+    SerialMon.printf("Durmiendo %u minutos...\n", (unsigned)minutes);
+    confirmFirmware(); // llegar a un sleep normal = el firmware esta vivo
+    if (mqtt.connected()) {
+        debugLog("Durmiendo %u minutos...", (unsigned)minutes);
+        mqtt.publish(topicState, "Sleeping");
+        mqtt.loop();
+        mqtt.disconnect();
+    }
+    client.stop();
+    powerOffModem();
+    esp_sleep_enable_timer_wakeup((uint64_t)minutes * 60ULL * 1000000ULL); // microsegundos
+    esp_deep_sleep_start(); // de aca no vuelve: el chip se reinicia al despertar
+}
+
+// ---------------------------------------------------------------------
+// OTA
+// ---------------------------------------------------------------------
+static void hexOf(const uint8_t* h, size_t n, char* out)
+{
+    for (size_t i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", h[i]);
+    out[2 * n] = 0;
+}
+
+static void logNetworkInfo()
+{
     SerialMon.println("===== INFO RED =====");
-    
     SerialMon.print("Operador: ");
     SerialMon.println(modem.getOperator());
- 
-    SerialMon.print("Señal (CSQ): ");
+    SerialMon.print("Senial (CSQ): ");
     SerialMon.println(modem.getSignalQuality());
- 
     SerialMon.print("Modem: ");
     SerialMon.println(modem.getModemInfo());
- 
     SerialMon.print("Conectado a red: ");
     SerialMon.println(modem.isNetworkConnected() ? "SI" : "NO");
- 
     SerialMon.print("GPRS conectado: ");
     SerialMon.println(modem.isGprsConnected() ? "SI" : "NO");
- 
     SerialMon.print("IP: ");
     SerialMon.println(modem.localIP());
- 
-    SerialMon.println("====================");
     SerialMon.println("===== INFO CELDA =====");
- 
     modem.sendAT("+CPSI?");
     String resp;
     modem.waitResponse(5000, resp);
- 
     SerialMon.println(resp);
     SerialMon.println("======================");
- 
-    if (!Update.begin(contentLength))
+}
+
+// Publica el avance del OTA. Se llama cada 5% (~20 veces por descarga), no por
+// cada lectura: cada publish son comandos AT que compiten con el socket de
+// descarga. El modem bufferea los datos del socket mientras tanto.
+// Si MQTT esta caido NO se reconecta aca (seria lento): simplemente se saltea.
+static void publishOtaProgress(int percent, size_t w, size_t t, float kbps)
+{
+    if (!mqtt.connected()) return;
+    char b[8];
+    snprintf(b, sizeof(b), "%d", percent);
+    mqtt.publish(topicOta, b);
+    debugLog("OTA %d%% %u/%u bytes %.1f KB/s", percent, (unsigned)w, (unsigned)t, kbps);
+    mqtt.loop();
+}
+
+bool downloadFirmware(const String& expectedSha)
+{
+#if OTA_REQUIRE_SHA256
+    if (expectedSha.length() != 64)
     {
-        SerialMon.println("No hay espacio suficiente para OTA");
-        debugLog("No hay espacio suficiente para OTA");
-        http.stop();
+        SerialMon.println("version.json sin sha256 valido: OTA cancelada");
+        debugLog("OTA cancelada: falta sha256");
         return false;
     }
- 
-    // --- Descarga por bloques (Range) ---
-    // En vez de UNA sesión de varios minutos (frágil: cualquier bache de
-    // red te hace perder todo), pedimos el archivo en pedacitos chicos,
-    // cada uno con su propia conexión y su propio timeout corto. Si un
-    // bloque falla, se reintenta SOLO ese bloque, no el archivo entero.
-    //const size_t CHUNK_SIZE            = 50000; // cuanto pedimos por vez (ajustable)
-    const uint32_t STALL_TIMEOUT       = 3000;  // 10s sin datos = damos el intento por trabado
-    const int MAX_FALLOS_SEGUIDOS      = 8;       // reintentos SIN progreso antes de rendirnos
- 
-    uint8_t buffer[2000];
-    size_t written        = 0;   // SIEMPRE = bytes realmente grabados en flash hasta ahora (fuente de verdad)
-    int lastPercent       = -1;
-    uint32_t otaStart     = millis();
-    int fallosSeguidos    = 0;
- 
-    // Un solo bucle: en cada vuelta pedimos "lo que falta, hasta CHUNK_SIZE
-    // bytes" arrancando SIEMPRE desde 'written'. Como 'written' solo avanza
-    // cuando el byte ya está físicamente grabado en la flash, un reintento
-    // nunca puede volver a pedir (ni duplicar) algo que ya se escribió.
-    while (written < contentLength)
+#endif
+
+    SerialMon.println("Descargando firmware...");
+    debugLog("Descargando firmware...");
+    mqtt.publish(topicState, "Updating");
+    mqtt.publish(topicOta, "0");
+    logNetworkInfo();
+
+    // Una sola conexion pide TODO el archivo (Range "bytes=N-") y el tamano sale
+    // del Content-Length de esa misma respuesta: antes se hacia un GET extra
+    // solo para leer el tamano (otro handshake TLS completo). Si la conexion se
+    // corta, se reanuda desde 'written' (bytes ya grabados en flash).
+    const uint32_t STALL_TIMEOUT  = 20000; // ms sin datos = intento trabado
+    const int MAX_FALLOS_SEGUIDOS = 8;     // reintentos SIN progreso antes de rendirse
+
+    static uint8_t buffer[2048];
+    size_t   total       = 0;
+    size_t   written     = 0;    // SIEMPRE = bytes realmente grabados en flash (fuente de verdad)
+    int      fallos      = 0;
+    bool     updateStarted = false;
+    uint32_t otaStart    = millis();
+    uint32_t lastLog     = 0;
+    int      lastStep    = 0;    // ultimo multiplo de 5% publicado por MQTT
+
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+
+    auto abortar = [&](const char* motivo) {
+        SerialMon.println(motivo);
+        if (updateStarted) Update.abort();
+        mbedtls_sha256_free(&sha);
+        http.stop();
+        debugLog("OTA: %s", motivo); // la conexion OTA ya esta cerrada
+    };
+    // true = hay que rendirse
+    auto fallo = [&](const char* msg) -> bool {
+        fallos++;
+        SerialMon.printf("%s (reintento %d/%d)\n", msg, fallos, MAX_FALLOS_SEGUIDOS);
+        if (fallos > MAX_FALLOS_SEGUIDOS) {
+            abortar("Demasiados fallos seguidos, abortando OTA");
+            return true;
+        }
+        delay(3000);
+        return false;
+    };
+
+    while (total == 0 || written < total)
     {
-        size_t wantLen  = contentLength - written;
-        size_t rangeEnd = written + wantLen - 1;
- 
         yield();
         http.stop();
         delay(200);
- 
-        String rangeHeader = "bytes=" + String(written) + "-" + String(rangeEnd);
- 
+
+        String rangeHeader = "bytes=" + String((unsigned long)written) + "-";
+
         http.beginRequest();
-        http.get(LINK_BIN);
-        http.sendHeader("Range", rangeHeader);
-        http.endRequest();
- 
-        int status = http.responseStatusCode();
- 
-        // Si el servidor no respeta el Range (devuelve 200 en vez de 206
-        // para un pedido que no arranca en el byte 0), no se puede seguir
-        // por partes con este hosting: mejor frenar claro que corromper.
+        int err = http.get(OTA_PATH_BIN);
+        if (err == 0) {
+            http.sendHeader("Range", rangeHeader);
+            http.endRequest();
+        }
+        int status = (err == 0) ? http.responseStatusCode() : err;
+
+        // Si el servidor no respeta el Range (200 en vez de 206 para un pedido
+        // que no arranca en el byte 0) no se puede reanudar: mejor frenar que corromper.
         if (written > 0 && status == 200)
         {
-            SerialMon.println("El servidor no soporta Range (HTTP 200 en vez de 206). No se puede reanudar por bloques con este hosting.");
-            Update.abort();
-            http.stop();
+            abortar("El servidor no soporta Range (HTTP 200 en vez de 206)");
             return false;
         }
- 
         if (status != 206 && status != 200)
         {
-            fallosSeguidos++;
-            SerialMon.printf("Pedido fallo (HTTP %d), reintento %d/%d\n", status, fallosSeguidos, MAX_FALLOS_SEGUIDOS);
-            if (fallosSeguidos > MAX_FALLOS_SEGUIDOS)
+            if (fallo("Pedido fallo")) return false;
+            continue;
+        }
+
+        // Hay que descartar los headers antes de leer el body.
+        http.skipResponseHeaders();
+        long cl = http.contentLength(); // bytes que faltan en ESTA respuesta
+        if (cl <= 0)
+        {
+            if (fallo("Content-Length invalido")) return false;
+            continue;
+        }
+
+        if (total == 0)
+        {
+            total = written + (size_t)cl;
+            SerialMon.printf("Firmware: %u bytes\n", (unsigned)total);
+            if (!Update.begin(total))
             {
-                SerialMon.println("Demasiados fallos seguidos, abortando OTA");
-                Update.abort();
-                http.stop();
+                abortar("No hay espacio suficiente para OTA");
                 return false;
             }
-            delay(3000);
-            continue; // reintenta pidiendo desde el MISMO 'written' (no avanzó)
+            updateStarted = true;
         }
- 
-        // CLAVE: hay que descartar los headers de la respuesta antes de
-        // leer el body. Sin esto, available()/read() devuelven los headers
-        // HTTP crudos (Connection, Content-Length, Server...) en vez del
-        // contenido real del archivo.
-        http.skipResponseHeaders();
- 
-        size_t recibidoEstePedido = 0;
-        uint32_t lastData = millis();
-        bool huboStall    = false;
- 
-        while (recibidoEstePedido < wantLen)
+        else if (written + (size_t)cl != total)
         {
-            int available = http.available();
- 
-            if (available > 0)
+            abortar("El archivo cambio en el servidor durante la descarga");
+            return false;
+        }
+
+        size_t   pedido   = total - written;
+        size_t   recibido = 0;
+        uint32_t lastData = millis();
+        bool     stall    = false;
+
+        while (recibido < pedido)
+        {
+            int avail = http.available();
+
+            if (avail > 0)
             {
-                size_t want = min((size_t)sizeof(buffer), wantLen - recibidoEstePedido);
-                int toRead  = min((size_t)available, want);
-                int len     = http.read(buffer, toRead);
- 
-                // DIAGNÓSTICO: primeros bytes del archivo, para confirmar
-                // que arrancamos con el header real de un firmware ESP32
-                // (0xE9) y no con basura de headers HTTP.
-                if (written == 0 && recibidoEstePedido == 0 && len > 0)
-                {
-                    SerialMon.print("Primeros bytes recibidos (hex): ");
-                    for (int i = 0; i < min(len, 16); i++)
-                    {
-                        SerialMon.printf("%02X ", buffer[i]);
-                    }
-                    SerialMon.println();
-                }
- 
+                size_t want = min((size_t)avail, min(sizeof(buffer), pedido - recibido));
+                int len = http.read(buffer, want);
+
                 if (len > 0)
                 {
-                    if (Update.write(buffer, len) != (size_t)len)
+                    // Un firmware ESP32 siempre arranca con 0xE9. Si no, es basura
+                    // (p.ej. headers HTTP o una pagina de error): no seguir.
+                    if (written == 0 && recibido == 0 && buffer[0] != 0xE9)
                     {
-                        // Esto es un error real de flash, no de red — no
-                        // tiene sentido reintentar, abortamos directamente.
-                        SerialMon.print("ERROR escribiendo flash: ");
-                        SerialMon.println(Update.errorString());
-                        Update.abort();
-                        http.stop();
+                        abortar("Imagen invalida: el primer byte no es 0xE9");
                         return false;
                     }
- 
-                    // Apenas se graba, avanzamos 'written' YA. Esto es lo
-                    // que garantiza que un stall a mitad de pedido nunca
-                    // duplique datos: lo ya grabado no se vuelve a pedir.
-                    written             += len;
-                    recibidoEstePedido  += len;
-                    lastData             = millis();
-                    fallosSeguidos        = 0; // si progresamos, reseteamos el contador de fallos
 
-
-                                        // Pedido completo: este es el hueco seguro para loguear y avisar
-                    // por MQTT (la conexión OTA ya está cerrada acá).
-                    int percent = (written * 100) / contentLength;
-                    float speedKB = (written / 1024.0) / ((millis() - otaStart) / 1000.0);
-            
-                    SerialMon.printf("OTA (%d%%)  %d/%d  | %.2f KB/s\n",percent,(int)written, (int)contentLength,speedKB);
-
-                    // Dejamos el MQTT CONECTADO entre bloques (no lo desconectamos más).
-                    // Solo lo reconectamos si de verdad se cayó (p.ej. el broker lo cerró
-                    // por keepalive). Esto ahorra el handshake completo en cada bloque.
-                    if (!mqtt.connected())
+                    if (Update.write(buffer, len) != (size_t)len)
                     {
-                        mqttConnect();
+                        // Error real de flash, no de red: no tiene sentido reintentar.
+                        SerialMon.print("ERROR escribiendo flash: ");
+                        SerialMon.println(Update.errorString());
+                        abortar("Error de escritura en flash");
+                        return false;
                     }
-                    if (mqtt.connected())
+                    mbedtls_sha256_update(&sha, buffer, len);
+
+                    // 'written' avanza apenas se graba: un stall nunca duplica datos.
+                    written  += len;
+                    recibido += len;
+                    lastData  = millis();
+                    fallos    = 0;
+
+                    // Serial cada 5 s (barato); MQTT solo al cruzar cada 5%.
+                    int   percent = (int)((written * 100) / total);
+                    float secs    = (millis() - otaStart) / 1000.0;
+                    float kbps    = secs > 0 ? (written / 1024.0) / secs : 0.0;
+
+                    if (millis() - lastLog >= 5000 || written == total)
                     {
-                        debugLog("OTA %d/%d (%d%%) %.2f KB/s", (int)written, (int)contentLength, percent, speedKB);
-                        mqtt.loop(); // procesa el PING/ACK de este publish, todavía en el hueco seguro
+                        lastLog = millis();
+                        SerialMon.printf("OTA (%d%%)  %u/%u  | %.2f KB/s\n",
+                                         percent, (unsigned)written, (unsigned)total, kbps);
                     }
-    
-                    lastPercent = percent;
+                    if (percent / 5 > lastStep)
+                    {
+                        lastStep = percent / 5;
+                        publishOtaProgress(percent, written, total, kbps);
+                    }
                 }
             }
-                else
+            else if (!http.connected())
             {
-                if (millis() - lastData > STALL_TIMEOUT)
-                {
-                    huboStall = true;
-                    break;
-                }
-                delay(50);
+                stall = true; // el servidor cerro antes de tiempo
+                break;
+            }
+            else if (millis() - lastData > STALL_TIMEOUT)
+            {
+                stall = true;
+                break;
+            }
+            else
+            {
+                delay(1);
             }
         }
-    
+
         http.stop();
         delay(100);
- 
-        if (huboStall)
-        {
-            fallosSeguidos++;
-            SerialMon.printf("Stall en byte %d, reintento %d/%d\n", (int)written, fallosSeguidos, MAX_FALLOS_SEGUIDOS);
-            debugLog("Stall !!!!!!");
-            if (fallosSeguidos > MAX_FALLOS_SEGUIDOS)
-            {
-                SerialMon.println("Demasiados fallos seguidos, abortando OTA");
-                Update.abort();
-                return false;
-            }
-            delay(3000);
-            continue; // pide desde el 'written' YA actualizado (lo recibido antes del stall no se pierde ni se duplica)
-        }
- 
 
+        if (stall)
+        {
+            SerialMon.printf("Stall en byte %u\n", (unsigned)written);
+            if (fallo("Descarga trabada")) return false;
+            continue; // pide desde el 'written' ya actualizado
+        }
     }
- 
+
     http.stop();
- 
+
+    uint8_t digest[32];
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    char hex[65];
+    hexOf(digest, sizeof(digest), hex);
+    SerialMon.printf("SHA-256: %s\n", hex);
+
+    if (expectedSha.length() == 64)
+    {
+        String esperado = expectedSha;
+        esperado.toLowerCase();
+        if (!esperado.equals(hex))
+        {
+            Update.abort();
+            SerialMon.println("SHA-256 NO coincide: firmware descartado");
+            debugLog("OTA: SHA-256 no coincide");
+            return false;
+        }
+    }
+
     if (!Update.end())
     {
         SerialMon.print("Update Error: ");
@@ -464,27 +560,28 @@ bool downloadFirmware()
         debugLog("Update Error: %s", Update.errorString());
         return false;
     }
- 
+
     if (!Update.isFinished())
     {
         SerialMon.println("Firmware incompleto");
         debugLog("Firmware incompleto");
         return false;
     }
- 
+
     SerialMon.println("OTA finalizada correctamente");
     debugLog("OTA finalizada correctamente");
+    markFirmwarePending(); // si el nuevo no se confirma, checkRollback() vuelve al anterior
     delay(1000);
- 
+
     ESP.restart();
- 
+
     return true;
 }
 
 void powerOnModem()
 {
   pinMode(MODEM_POWER_KEY, OUTPUT);
-  // SIM7070 power on 
+  // SIM7070 power on
   digitalWrite(MODEM_POWER_KEY, HIGH);
   delay(100);
   digitalWrite(MODEM_POWER_KEY, LOW);
@@ -492,6 +589,16 @@ void powerOnModem()
   digitalWrite(MODEM_POWER_KEY, HIGH);
 
   pinMode(MODEM_POWER_KEY, INPUT);
+}
+
+// UART del modem. El buffer RX de HardwareSerial es de 256 B por defecto y
+// debe ampliarse ANTES de begin(): con CARECV de 1024 B a 921600 baud se
+// pueden perder bytes -> descarga corrupta.
+static void atBegin(uint32_t baud)
+{
+  SerialAT.end();
+  SerialAT.setRxBufferSize(4096);
+  SerialAT.begin(baud, SERIAL_8N1, 26, 27);
 }
 
 void InitUart(void){
@@ -502,10 +609,31 @@ void InitUart(void){
   // Set console baud rate
   SerialMon.begin(115200);
   delay(1000);
-  SerialAT.begin(921600, SERIAL_8N1, 26, 27);
+  atBegin(921600);
   delay(1000);
   SerialMaxB.begin(9600,SERIAL_8N1,DATAIN);
   delay(1000);
+}
+
+// Si el modem no contesta a 921600 (p.ej. modem nuevo o reseteado de fabrica,
+// que arranca en autobaud/115200), lo reconfigura y guarda el baudrate.
+static void modemBaudSync()
+{
+  if (modem.testAT(2000)) return;
+  SerialMon.println("Modem no responde a 921600, probando 115200...");
+  atBegin(115200);
+  if (modem.testAT(2000)) {
+    modem.sendAT("+IPR=921600");
+    modem.waitResponse();
+    delay(200);
+    atBegin(921600);
+    delay(300);
+    modem.sendAT("&W"); // persistir
+    modem.waitResponse();
+    SerialMon.println("Baudrate del modem fijado a 921600");
+  } else {
+    atBegin(921600); // no era problema de baudrate: seguimos como siempre
+  }
 }
 
 void InitSensors(){
@@ -527,25 +655,20 @@ void InitSensors(){
   return;
 }
 
-void InitModem(void){
-  
+bool InitModem(void){
+
   powerOnModem();
+  delay(2500);
+  modemBaudSync();
   // Restart takes quite some time
   // To skip it, call init() instead of restart()
   SerialMon.println("Initializing modem... ");
   modem.restart();
   //modem.init();
-  delay(6000); 
+  delay(6000);
   SerialMon.println("Configurando modem... ");
-  modem.setPreferredMode(1); //Mode NB-Iot lo 
+  modem.setPreferredMode(1); // 1 = LTE Cat-M1 (2 = NB-IoT, 3 = ambos)
   delay(3000);
-  // Fijar baudrate (sin autobaud) — lo repetimos en cada boot, no dependemos de &W
-  /*modem.sendAT("+IPR=921600");
-  modem.waitResponse();
-  delay(200);
-  // Recién ahora subimos el UART local
-  SerialAT.updateBaudRate(921600);
-  delay(500);*/
   String modemInfo = modem.getModemInfo();
   SerialMon.print("Modem Info: ");
   SerialMon.println(modemInfo);
@@ -561,16 +684,22 @@ void InitModem(void){
 
       SerialMon.printf("Intento %d fallido\n", intentos);
 
-      if (intentos >= 2)
+      if (intentos >= NET_MAX_TRIES)
       {
-          SerialMon.println("Reiniciando el módem...");
+          // Sin cobertura: no quedarse en un bucle infinito gastando bateria.
+          SerialMon.println("Sin red: abandono y vuelvo a dormir");
+          return false;
+      }
+
+      if (intentos % 2 == 0)
+      {
+          SerialMon.println("Reiniciando el modem...");
           modem.restart();
-          intentos = 0;
       }
 
       delay(5000);
   }
-  
+
   SerialMon.println(" success");
 
   if (modem.isNetworkConnected()) { SerialMon.println("Network connected"); }
@@ -581,15 +710,14 @@ void InitModem(void){
     if (!modem.gprsConnect(apn, gprsUser, gprsPass)) {
       SerialMon.println(" fail");
       delay(10000);
-      return;
+      return true; // MQTTVerify() reintenta en el loop
     }
     SerialMon.println(" success");
     if (modem.isGprsConnected()) { SerialMon.println("GPRS connected"); }
 
     // Desactivar PSM y eDRX: si quedan habilitados, el modem puede
     // "dormirse" solo en medio de una transferencia larga (como la
-    // descarga OTA) y quedarse sin recibir datos varios segundos/minutos
-    // hasta el próximo ciclo de paging, aunque la red y la señal estén bien.
+    // descarga OTA) y quedarse sin recibir datos varios segundos/minutos.
     modem.sendAT("+CPSMS=0");
     modem.waitResponse();
     delay(200);
@@ -598,95 +726,41 @@ void InitModem(void){
     delay(200);
   #endif
 
-  return;
+  return true;
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int len) {
-    Serial.println("¡¡¡CALLBACK EJECUTADO!!!");
-
     Serial.print("Topic: ");
     Serial.println(topic);
 
-    String comando = "";
-
-    for (unsigned int i = 0; i < len; i++) {
-        comando += (char)payload[i];
-    }
-
-    Serial.print("Comando recibido: ");
-    Serial.println(comando);
-
-    if (comando == "OTA") {
-        Serial.println("Iniciando OTA...");
-        enviarCallMeBot();   
-        downloadFirmware();
-    }
-    else if (comando == "REBOOT") {
-        Serial.println("Reiniciando...");
-        ESP.restart();
-    }
-    else if (comando == "SLEEP 30") {
-        Serial.println("Durmiendo 30 minutos...");
-        debugLog("Durmiendo 30 minutos...");
-        mqtt.publish(topicState,"Sleeping");
-        mqtt.disconnect();
-        client.stop();
-        powerOffModem();
-        esp_sleep_enable_timer_wakeup((uint64_t)30 * 60ULL * 1000000ULL); // la función espera microsegundos
-        esp_deep_sleep_start(); // de acá no vuelve: el chip se reinicia al despertar
-    }
-    else if (comando == "SLEEP 120") {
-        Serial.println("Durmiendo 120 minutos...");
-        debugLog("Durmiendo 120 minutos...");
-        mqtt.publish(topicState,"Sleeping");
-        mqtt.disconnect();
-        client.stop();
-        powerOffModem();
-        esp_sleep_enable_timer_wakeup((uint64_t)120 * 60ULL * 1000000ULL); // la función espera microsegundos
-        esp_deep_sleep_start(); // de acá no vuelve: el chip se reinicia al despertar
-    }
-    else {
-
-    }
+    if (len >= sizeof(pendingCmd)) len = sizeof(pendingCmd) - 1;
+    memcpy(pendingCmd, payload, len);
+    pendingCmd[len] = '\0';
+    cmdPending = true; // se ejecuta desde loop()
 }
 
-double getPressure() //Retorna la presion en mb
+// ---------------------------------------------------------------------
+// Sensores
+// ---------------------------------------------------------------------
+double getPressure() //Retorna la presion en mb, o NAN si falla
 {
   char status;
-  double T,P,p0,a;
+  double T,P;
 
   status = pressure.startTemperature();
   if (status != 0)
   {
-    // Wait for the measurement to complete:
-
+    // Esperar a que termine la medicion
     delay(status);
-
-    // Retrieve the completed temperature measurement:
-    // Note that the measurement is stored in the variable T.
-    // Use '&T' to provide the address of T to the function.
-    // Function returns 1 if successful, 0 if failure.
 
     status = pressure.getTemperature(T);
     if (status != 0)
     {
-      // Start a pressure measurement:
-      // The parameter is the oversampling setting, from 0 to 3 (highest res, longest wait).
-      // If request is successful, the number of ms to wait is returned.
-      // If request is unsuccessful, 0 is returned.
-
+      // Parametro: oversampling 0..3 (3 = mayor resolucion, mas espera).
       status = pressure.startPressure(3);
       if (status != 0)
       {
-        // Wait for the measurement to complete:
         delay(status);
-
-        // Retrieve the completed pressure measurement:
-        // Note that the measurement is stored in the variable P.
-        // Use '&P' to provide the address of P.
-        // Note also that the function requires the previous temperature measurement (T).
-        // (If temperature is stable, you can do one temperature measurement for a number of pressure measurements.)
-        // Function returns 1 if successful, 0 if failure.
 
         status = pressure.getPressure(P,T);
         if (status != 0)
@@ -700,134 +774,122 @@ double getPressure() //Retorna la presion en mb
     else SerialMon.println("Error obteniendo mediciones de temperatura\n");
   }
   else SerialMon.println("Error iniciando mediciones de temperatura\n");
-  return 1;
+  return NAN;
 }
 
-void SensorRead(char *dist){
+bool readTemperature(double &t)
+{
+  char status = pressure.startTemperature();
+  if (status == 0) return false;
+  delay(status);
+  return pressure.getTemperature(t) != 0;
+}
 
-    /* Funcion que devuelve ERROR si en el puerto serie no recibio la suficiente cantidad de datos 
-    establecida (6) para leer, dado que todavia no llego el paquete completo de los
-    datos del Sensor o llego con errores (sin R al comienzo)
+// Maxbotix: paquete de 6 bytes "Rxxxx\r". Devuelve "d.ddd" (metros) en dist (>= 8 bytes).
+// Devuelve false (y escribe "ERROR") si no llego un paquete valido.
+bool SensorRead(char *dist){
+    char tmp[8];
 
-    Recibe Char* de 6 lugares.
-
-    */
-    
-    char * distancia=NULL;
-    int data=0;
-    int count=0;
-    int flag=1;
-
-    while (flag==1 and count<1000)
+    for (int count = 0; count < 1000; count++)
     {
-    
-    digitalWrite(RANGING,HIGH);
-    delayMicroseconds(200);
-    digitalWrite(RANGING,LOW);
-    data=SerialMaxB.available();
-    if (data==6)
-    {
-    distancia=(char *)malloc(data*sizeof(char));
-    SerialMaxB.read(distancia,data);
-    if ((*distancia=='R')){
-    *(distancia+(data*sizeof(char)-1))='\0';
-    *(distancia)=*(distancia+1);
-    *(distancia+1*sizeof(char))='.';
-    strcpy(dist,distancia);
-    free(distancia);
-        flag=0;
-        return ;
-    }
-    else{
-        distancia=(char *)malloc(data*sizeof(char));
-        SerialMaxB.read(distancia,data);
-        free(distancia);
-        flag=1;
-        count++;
-    }
-    }else{
-        flag=1;
-        count++; //
-    }
-    }
-    strcpy(dist,"ERROR");
-    
-    } 
+        digitalWrite(RANGING,HIGH);
+        delayMicroseconds(200);
+        digitalWrite(RANGING,LOW);
 
-void batteryRead(char *bateria){
-    
+        int data = SerialMaxB.available();
+        if (data == 6)
+        {
+            SerialMaxB.readBytes(tmp, 6);
+            if (tmp[0] == 'R')
+            {
+                dist[0] = tmp[1];
+                dist[1] = '.';
+                dist[2] = tmp[2];
+                dist[3] = tmp[3];
+                dist[4] = tmp[4];
+                dist[5] = '\0';
+                return true;
+            }
+        }
+        else if (data > 6)
+        {
+            // Llegaron mas bytes de los esperados (paquetes pegados): antes nunca
+            // se vaciaba el buffer y se devolvia ERROR para siempre.
+            while (SerialMaxB.available()) SerialMaxB.read();
+        }
+    }
+    strcpy(dist, "ERROR");
+    return false;
+}
+
+float batteryRead(char *bateria){
     uint16_t v = analogRead(ADC_PIN);
     float battery_voltage = ((float)v / 4095.0) * 2.0 * 3.3 * (1100/ 1000.0);
-    strcpy(bateria, (String(battery_voltage) + "V\n").c_str());
-
-    // When connecting USB, the battery detection will return 0,
-    // because the adc detection circuit is disconnected when connecting USB
-    //if (strcmp(bateria, "Voltage :0.00V\n") == 0) {
-    //    Serial.println("USB is connected, please disconnect USB.");
-    //  }
+    snprintf(bateria, 16, "%.2fV", battery_voltage);
+    // Con USB conectado la lectura da 0 (el circuito de deteccion se desconecta).
+    return battery_voltage;
 }
 
 void solarRead(char *solar) {
     uint32_t mv = analogReadMilliVolts(36) * 2;
     float voltage = mv / 1000.0;
-    snprintf(solar, 16, "%.2fV\n", voltage);
+    snprintf(solar, 16, "%.2fV", voltage);
 }
 
 void SensadoYenvio()
 {
     int csq;
-    double a;
-    char dist[6];
+    char dist[8];
     char presion[16];
-    char signal[6];
+    char signal[8];
     char temperatura[16];
-    char bateria[100];
-    char solar[100];
-    int bat;
-    int Time=0;
+    char bateria[16];
+    char solar[16];
     SerialMon.println("Lectura de datos");
     SerialMon.println("=====================");
     //Lectura de la presion
-    pres= getPressure();
+    pres = getPressure();
     SerialMon.print("Presion: ");
     SerialMon.print(pres);
-    SerialMon.println(" mb ");  
+    SerialMon.println(" mb ");
     delay(1000);
     //Lectura de temperatura
-    Time=pressure.startTemperature();
-    delay(Time);
-    pressure.getTemperature(temp);
+    bool tempOk = readTemperature(temp);
+    if (!tempOk) temp = NAN;
     SerialMon.print("Grados: ");
     SerialMon.println(temp);
     delay(1000);
     //Lectura de distancia
-    SensorRead(dist);
+    bool distOk = SensorRead(dist);
     SerialMon.print("Distancia: ");
     SerialMon.print(dist);
-    SerialMon.println(" metros "); 
+    SerialMon.println(" metros ");
     //Lectura de senial
     csq = modem.getSignalQuality();
     SerialMon.print("Senial: ");
     SerialMon.println(csq);
     SerialMon.println("=====================");
     //Estado de bateria
-    batteryRead(bateria);
+    float vbat = batteryRead(bateria);
     //Lectura de voltaje del panel solar
     solarRead(solar);
     //Conversion de datos
-    sprintf(presion,"%f",pres);
-    sprintf(temperatura,"%f",temp);
     itoa(csq,signal,10);
-    //Envio de datos
-    mqtt.publish(topicDistancia,dist);
-    mqtt.publish(topicPresion,presion);
-    mqtt.publish(topicTemperatura,temperatura);
+    //Envio de datos (los invalidos no se publican como si fueran validos)
+    mqtt.publish(topicDistancia,dist); // "ERROR" si el sensor no respondio (como antes)
+    if (!isnan(pres)) {
+        snprintf(presion, sizeof(presion), "%f", pres);
+        mqtt.publish(topicPresion,presion);
+    }
+    if (tempOk) {
+        snprintf(temperatura, sizeof(temperatura), "%f", temp);
+        mqtt.publish(topicTemperatura,temperatura);
+    }
     mqtt.publish(topicSignal,signal);
     mqtt.publish(topicBateria,bateria);
     mqtt.publish(topicSolar,solar);
     mqtt.publish(topicFirmware,FIRMWARE_VERSION);
-    publicarDatos(temp, pres, atof(dist), atof(bateria));
-
+    publicarDatos(temp, pres, distOk ? atof(dist) : NAN, vbat);
 }
 
 void MQTTVerify(){
@@ -856,7 +918,6 @@ void MQTTVerify(){
       if (modem.isGprsConnected()) { SerialMon.println("GPRS reconnected"); }
     }
 
-  
 if (!mqtt.connected())
 {
     SerialMon.println("====== MQTT disconnected ========");
@@ -866,24 +927,29 @@ if (!mqtt.connected())
         lastReconnectAttempt = millis();
 
         if (mqttConnect())
-        {   
+        {
             SerialMon.println("====== MQTT Reconnected ========");
             lastReconnectAttempt = 0;
         }
     }
     delay(100);
-
 }
 }
 
+// ---------------------------------------------------------------------
+// Chequeo de version
+// ---------------------------------------------------------------------
 bool isNewerVersion(String nueva, String actual)
 {
-    int nMajor, nMinor, nPatch;
-    int aMajor, aMinor, aPatch;
+    int nMajor = 0, nMinor = 0, nPatch = 0;
+    int aMajor = 0, aMinor = 0, aPatch = 0;
 
-    sscanf(nueva.c_str(), "%d.%d.%d", &nMajor, &nMinor, &nPatch);
-    sscanf(actual.c_str(), "%d.%d.%d", &aMajor, &aMinor, &aPatch);
-
+    // Si la version viene vacia o mal formada, NO actualizar
+    // (antes quedaban variables sin inicializar -> OTA espuria).
+    if (sscanf(nueva.c_str(), "%d.%d.%d", &nMajor, &nMinor, &nPatch) != 3)
+        return false;
+    if (sscanf(actual.c_str(), "%d.%d.%d", &aMajor, &aMinor, &aPatch) != 3)
+        return false;
 
     if(nMajor > aMajor)
         return true;
@@ -897,126 +963,179 @@ bool isNewerVersion(String nueva, String actual)
     return false;
 }
 
-void checkForUpdate()
+static void closeOtaConnection()
 {
-    //TinyGsmClientSecure otaClient(modem);
-
-    SerialMon.println("Consultando actualización...");
-    debugLog("Consultando actualización...");
-    http.get(LINK_VERSION);
-
-
-    int httpCode = http.responseStatusCode();
-
-
-    if (httpCode == 200)
-    {
-        String payload = http.responseBody();
-
-        SerialMon.println("Respuesta:");
-        SerialMon.println(payload);
-
-
-        JsonDocument doc;
-
-        DeserializationError error = deserializeJson(doc, payload);
-
-        if(error)
-        {
-            SerialMon.println("Error leyendo JSON");
-            return;
-        }
-
-
-        String versionNueva = doc["version"];
-
-
-        SerialMon.print("Version actual: ");
-        SerialMon.println(FIRMWARE_VERSION);
-
-        SerialMon.print("Version servidor: ");
-        SerialMon.println(versionNueva);
-
-
-        if(isNewerVersion(versionNueva, FIRMWARE_VERSION))
-        {
-            SerialMon.println("Hay una actualización!");
-            debugLog("Hay una actualización!");
-           downloadFirmware();
-
-        }
-        else
-        {
-            SerialMon.println("Firmware actualizado.");
-            debugLog("Firmware actualizado.");
-        }
-    }
-    else
-    {
-        SerialMon.print("Error HTTP: ");
-        SerialMon.println(httpCode);
-    }
-    SerialMon.print("Cerrando conexión HTTP...");
-    http.stop();       // si existe en tu versión
-    otaClient.stop();  // este seguro existe
+    http.stop();
+    otaClient.stop();
     delay(100); // sino no se cierran sockets y se queda colgado el modem
 }
 
+static bool fetchVersionInfo(String& version, String& sha256)
+{
+    int err = http.get(OTA_PATH_VERSION);
+    if (err != 0)
+    {
+        SerialMon.print("Error HTTP al pedir version: ");
+        SerialMon.println(err);
+        return false;
+    }
 
+    int httpCode = http.responseStatusCode();
+    if (httpCode != 200)
+    {
+        SerialMon.print("Error HTTP: ");
+        SerialMon.println(httpCode);
+        return false;
+    }
+
+    String payload = http.responseBody();
+    SerialMon.println("Respuesta:");
+    SerialMon.println(payload);
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error)
+    {
+        SerialMon.println("Error leyendo JSON");
+        return false;
+    }
+
+    version = String(doc["version"] | "");
+    sha256  = String(doc["sha256"] | "");
+    return version.length() > 0;
+}
+
+// force = true: instala aunque la version no sea mas nueva (comando "OTA").
+void checkForUpdate(bool force = false)
+{
+    SerialMon.println("Consultando actualizacion...");
+    debugLog("Consultando actualizacion...");
+
+    String versionNueva, sha256;
+    bool ok = fetchVersionInfo(versionNueva, sha256);
+    closeOtaConnection(); // el body ya se leyo completo: liberar el socket antes de seguir
+
+    if (!ok) return;
+
+    SerialMon.print("Version actual: ");
+    SerialMon.println(FIRMWARE_VERSION);
+    SerialMon.print("Version servidor: ");
+    SerialMon.println(versionNueva);
+
+    if (force || isNewerVersion(versionNueva, FIRMWARE_VERSION))
+    {
+        SerialMon.println("Hay una actualizacion!");
+        debugLog("Hay una actualizacion! (%s)", versionNueva.c_str());
+        downloadFirmware(sha256); // si sale bien reinicia y no vuelve
+        closeOtaConnection();
+    }
+    else
+    {
+        SerialMon.println("Firmware actualizado.");
+        debugLog("Firmware actualizado.");
+    }
+}
+
+// ---------------------------------------------------------------------
+// Comandos MQTT (se ejecutan desde loop, nunca dentro del callback)
+// ---------------------------------------------------------------------
+void processPendingCommand()
+{
+    if (!cmdPending) return;
+    cmdPending = false;
+
+    String comando(pendingCmd);
+    comando.trim();
+    SerialMon.print("Comando recibido: ");
+    SerialMon.println(comando);
+
+    if (comando == "OTA") {
+        Serial.println("Iniciando OTA...");
+        enviarCallMeBot();
+        checkForUpdate(true);
+    }
+    else if (comando == "REBOOT") {
+        Serial.println("Reiniciando...");
+        debugLog("Reiniciando...");
+        mqtt.loop();
+        ESP.restart();
+    }
+    else if (comando.startsWith("SLEEP ")) {
+        long minutos = comando.substring(6).toInt();
+        if (minutos >= 1 && minutos <= 1440) {
+            goToSleep((uint32_t)minutos);
+        } else {
+            debugLog("SLEEP invalido: %s", comando.c_str());
+        }
+    }
+}
 
 void setup() {
   pinMode(12,OUTPUT);
   pinMode(35, INPUT);
   InitUart();
+  checkRollback();
   const esp_partition_t* running = esp_ota_get_running_partition();
-  Serial.printf("Running partition: %s\n", running->label);
+  Serial.printf("Running partition: %s | Firmware %s\n", running->label, FIRMWARE_VERSION);
 
   InitSensors();
-  InitModem();
-  
+  analogReadResolution(12); // valido: 9..12 bits. batteryRead asume 4095
+  snprintf(mqttClientId, sizeof(mqttClientId), "aquaman1-%08X", (unsigned int)(ESP.getEfuseMac() & 0xFFFFFFFFULL));
+
   // MQTT Broker setup
   mqtt.setServer(broker, 1883);
   mqtt.setCallback(mqttCallback);
-    analogReadResolution(200);
+  mqtt.setBufferSize(512);
+  mqtt.setKeepAlive(60);
 
+  if (!InitModem()) {
+    goToSleep(SLEEP_MINUTES);
+  }
+
+  awakeStart = millis();
 }
 
 void loop() {
-    mqtt.loop();
-    SerialMon.println("empezando LOOP");
-    digitalWrite(12,HIGH);
-    MQTTVerify();
-    mqtt.publish(topicState,"Awake");
-    debugLog("voy a sensar y enviar datos");
-    SensadoYenvio();
-    debugLog("envié datos");
-    digitalWrite(12,LOW);
-    
+    static uint32_t lastPublish = 0;
+    static bool     firstDone   = false;
+    static bool     otaChecked  = false;
 
-    if (actflag==0 )
-    {
-        actflag=1;
-    debugLog("voy a checkear si hay actualizacion de firmware");
-    checkForUpdate();
-    delay(100);
     mqtt.loop();
+    processPendingCommand();
+
+    // Publica al principio y despues cada PUBLISH_INTERVAL (antes: sin pausa,
+    // ~20 ciclos de telemetria por despertar).
+    if (!firstDone || millis() - lastPublish >= PUBLISH_INTERVAL)
+    {
+        MQTTVerify();
+        if (mqtt.connected())
+        {
+            lastPublish = millis();
+            digitalWrite(12,HIGH);
+            mqtt.publish(topicState,"Awake");
+            debugLog("voy a sensar y enviar datos");
+            SensadoYenvio();
+            debugLog("envie datos");
+            digitalWrite(12,LOW);
+            firstDone = true;
+
+            if (!otaChecked)
+            {
+                otaChecked = true;
+                debugLog("voy a checkear si hay actualizacion de firmware");
+                checkForUpdate(false);
+                mqtt.loop();
+            }
+        }
     }
+
     // --- Deep sleep ---
     // El ESP32 se apaga casi por completo y se despierta solo pasados
-    // SLEEP_MINUTES minutos. Al despertar, es como un reinicio: vuelve a
-    // correr setup() entero (reconecta módem, red, MQTT, todo de nuevo).
-    // Solo dormimos cada 4 minutos, no en cada vuelta del loop.
-    static uint32_t TimmerSleep = 0;
-    if (millis() - TimmerSleep >= AWAKE_INTERVAL)
+    // SLEEP_MINUTES minutos. Al despertar corre setup() entero.
+    if (millis() - awakeStart >= AWAKE_INTERVAL)
     {
-    TimmerSleep = millis();
-    SerialMon.printf("Durmiendo %d minutos...\n", SLEEP_MINUTES);
-    debugLog("Durmiendo 15 minutos...");
-    mqtt.publish(topicState,"Sleeping");
-    mqtt.disconnect();
-    client.stop();
-    powerOffModem();
-    esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_MINUTES * 60ULL * 1000000ULL); // la función espera microsegundos
-    esp_deep_sleep_start(); // de acá no vuelve: el chip se reinicia al despertar
+        goToSleep(SLEEP_MINUTES);
     }
+
+    delay(50);
 }
