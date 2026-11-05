@@ -830,10 +830,33 @@ float batteryRead(char *bateria){
     return battery_voltage;
 }
 
-void solarRead(char *solar) {
+float solarRead(char *solar) {
     uint32_t mv = analogReadMilliVolts(36) * 2;
     float voltage = mv / 1000.0;
     snprintf(solar, 16, "%.2fV", voltage);
+    return voltage;
+}
+
+// Estado del equipo en un topic APARTE de la telemetria. La telemetria
+// (amigosdelagua/mareografo/telemetria) queda exactamente igual para no romper
+// el programa del servidor que la guarda; este topic lo toma quien lo necesite.
+// CSQ 0..30 -> dBm = -113 + 2*CSQ ; 99 = desconocido.
+void publicarEstado(int csq, float solarV, float bateriaV) {
+    JsonDocument doc;
+    doc["firmware"] = FIRMWARE_VERSION;
+    if (csq >= 0 && csq <= 31) {
+        doc["senal_csq"] = csq;
+        doc["senal_dbm"] = -113 + 2 * csq;
+    } else {
+        doc["senal_csq"] = nullptr;
+        doc["senal_dbm"] = nullptr;
+    }
+    doc["solar_v"] = solarV;
+    doc["bateria_v"] = bateriaV;
+
+    char buffer[200];
+    serializeJson(doc, buffer);
+    mqtt.publish("amigosdelagua/mareografo/estado", buffer);
 }
 
 void SensadoYenvio()
@@ -872,7 +895,7 @@ void SensadoYenvio()
     //Estado de bateria
     float vbat = batteryRead(bateria);
     //Lectura de voltaje del panel solar
-    solarRead(solar);
+    float vsolar = solarRead(solar);
     //Conversion de datos
     itoa(csq,signal,10);
     //Envio de datos (los invalidos no se publican como si fueran validos)
@@ -890,6 +913,7 @@ void SensadoYenvio()
     mqtt.publish(topicSolar,solar);
     mqtt.publish(topicFirmware,FIRMWARE_VERSION);
     publicarDatos(temp, pres, distOk ? atof(dist) : NAN, vbat);
+    publicarEstado(csq, vsolar, vbat);
 }
 
 void MQTTVerify(){
