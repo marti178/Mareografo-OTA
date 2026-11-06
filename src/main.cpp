@@ -1001,6 +1001,7 @@ static bool fetchVersionInfo(String& version, String& sha256)
     {
         SerialMon.print("Error HTTP al pedir version: ");
         SerialMon.println(err);
+        debugLog("OTA: no se pudo consultar la version (err %d)", err);
         return false;
     }
 
@@ -1009,6 +1010,7 @@ static bool fetchVersionInfo(String& version, String& sha256)
     {
         SerialMon.print("Error HTTP: ");
         SerialMon.println(httpCode);
+        debugLog("OTA: el servidor respondio HTTP %d", httpCode);
         return false;
     }
 
@@ -1021,6 +1023,7 @@ static bool fetchVersionInfo(String& version, String& sha256)
     if (error)
     {
         SerialMon.println("Error leyendo JSON");
+        debugLog("OTA: version.json ilegible (%s)", error.c_str());
         return false;
     }
 
